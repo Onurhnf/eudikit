@@ -1,0 +1,63 @@
+# EU reference verifier — skeleton compose for comparison testing.
+#
+# ⚠️ STATUS: NOT YET RUN. The verified path is cloning the upstream repository and using its own
+# compose file (testbed/README.md §1), which ships the keystore and haproxy config this file
+# deliberately does not carry. Use this only for the narrow job of putting the *backend* on
+# port 8080 next to eudikit and diffing verdicts — and expect to fix the keystore mount below
+# before it boots.
+#
+#   docker compose -f testbed/docker-compose.yml up -d
+#
+# Why a skeleton and not a copy: the upstream compose is self-sufficient and moves faster than we
+# do. Copying it here would create a second source of truth that silently rots.
+
+services:
+  verifier-backend:
+    image: ghcr.io/eu-digital-identity-wallet/av-srv-verifier-endpoint:latest
+    container_name: eudikit-testbed-verifier
+    ports:
+      - '8080:8080'
+    environment:
+      # The URL handed to the wallet in request_uri / response_uri. `localhost` is unreachable
+      # from a phone: either `adb reverse tcp:8080 tcp:8080`, or set your LAN IP here.
+      VERIFIER_PUBLICURL: 'http://localhost:8080'
+
+      # AV profile mandates plain direct_post. Alternative: DirectPostJwt.
+      VERIFIER_RESPONSE_MODE: 'DirectPost'
+
+      # REQUIRED BY THE AV WALLET. Without it the client id in the device auth handover is wrong
+      # and every device signature fails. The EU verifier can only set this globally; eudikit
+      # makes the client-id prefix choosable per request instead.
+      VERIFIER_MDOC_REDIRECTURICLIENTIDINDEVICEAUTHHANDOVER: 'true'
+
+      # Debug mode: answers 200 even when verification failed, attaching a trust_info report.
+      # Keep it on while diffing (it is the only way to see their full check list), and remember
+      # that this permissiveness is precisely what eudikit inverts: we reject by default and
+      # return the full diagnostics in every mode.
+      VERIFIER_ALWAYSACCEPTWALLETRESPONSE: 'true'
+
+      # Access certificate (ES512) used to sign request objects. The keystore lives in the
+      # upstream repository under docker/; mount it via the volume below.
+      VERIFIER_ACCESS_CERTIFICATE_SIGNING_ALGORITHM: 'ES512'
+      VERIFIER_ACCESS_CERTIFICATE_KEYSTORE: 'file:///certs/keystore.jks'
+      VERIFIER_ACCESS_CERTIFICATE_KEYSTORE_TYPE: 'jks'
+      VERIFIER_ACCESS_CERTIFICATE_KEYSTORE_PASSWORD: 'keystore'
+      VERIFIER_ACCESS_CERTIFICATE_ALIAS: 'access_certificate'
+      VERIFIER_ACCESS_CERTIFICATE_PASSWORD: 'access_certificate'
+
+      # Without this classification the AV credential is rejected outright:
+      # VERIFIER_ATTESTATION_CLASSIFICATIONS: '{"eaa":[{"useCase":"age-verification","vcts":[],"docTypes":["eu.europa.ec.av.1"]}]}'
+
+      # Delegation to the trust validator. IF UNSET, EVERY ISSUER IS TRUSTED — the EU stack's
+      # default posture, and the reason our default is the opposite.
+      # VERIFIER_TRUSTVALIDATOR_SERVICEURL: 'http://host.docker.internal:8082/trust'
+    # Uncomment and point at the upstream repo's docker/ directory (it holds keystore.jks):
+    # volumes:
+    #   - ../../av-srv-verifier-endpoint/docker/certs:/certs:ro
+
+    # All published images are amd64; on Apple Silicon they run under Rosetta.
+    platform: linux/amd64
+
+# The trust validator is deliberately absent: the published image does not contain the
+# age-verification use case at all, so it has to be built from source
+# (`./gradlew bootRun --args='--server.port=8082'`). See testbed/README.md §4.

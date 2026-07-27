@@ -1,0 +1,51 @@
+{
+  "name": "@eudikit/expo",
+  "version": "0.0.0",
+  "description": "React Native / Expo transport for eudikit wallet verification (deep-link + QR in v1)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@eudikit/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "keywords": [
+    "eudi",
+    "eidas",
+    "openid4vp",
+    "age-verification",
+    "mdoc",
+    "verifiable-credentials",
+    "digital-credentials-api"
+  ],
+  "author": "Onur Eren Hanife <onurhnf@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Onurhnf/eudikit.git",
+    "directory": "packages/expo"
+  },
+  "homepage": "https://github.com/Onurhnf/eudikit#readme",
+  "bugs": {
+    "url": "https://github.com/Onurhnf/eudikit/issues"
+  }
+}

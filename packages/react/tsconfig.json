@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The only package that needs lib.dom: it is the layer that talks to
+    // navigator.credentials.get() and renders UI.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "outDir": "dist",
+    "rootDir": ".",
+    // No ambient @types are pulled in globally: this package's types come from imports
+    // (@types/react) and the DOM lib above.
+    "types": []
+  },
+  "include": ["src"]
+}

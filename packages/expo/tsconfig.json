@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    // Transport layer only — no Node globals, no DOM. Runs on React Native.
+    "types": []
+  },
+  "include": ["src"]
+}
