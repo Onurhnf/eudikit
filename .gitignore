@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+coverage/
+
+# secrets and testbed material
+.env
+.env.*
+!.env.example
+*.pem
+*.jks
+*.p12
+*.apk
+
+.DS_Store
+*.log
+
+# local working files
+.claude/
+research/
+CLAUDE.md
+api-draft.md

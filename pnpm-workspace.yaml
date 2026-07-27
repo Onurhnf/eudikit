@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+# examples/* and testbed/ stay outside the workspace on purpose: both are
+# documentation-only for now and join the workspace once they carry real code.
+
+# pnpm 10: packages allowed to run their postinstall scripts.
+onlyBuiltDependencies:
+  - '@biomejs/biome'
+  - esbuild
+  - turbo

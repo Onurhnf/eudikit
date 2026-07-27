@@ -1,0 +1,34 @@
+{
+  "name": "eudikit-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Relying-party SDK for the EU Digital Identity / Age Verification wallet ecosystem",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.19.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.5",
+    "turbo": "^2.10.7",
+    "typescript": "^7.0.2"
+  },
+  "author": "Onur Eren Hanife <onurhnf@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Onurhnf/eudikit.git"
+  },
+  "homepage": "https://github.com/Onurhnf/eudikit#readme",
+  "bugs": {
+    "url": "https://github.com/Onurhnf/eudikit/issues"
+  }
+}
