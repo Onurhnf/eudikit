@@ -3,21 +3,28 @@
 The framework-agnostic verifier engine: build an OpenID4VP request, hand the wallet's response
 back, get a verified result — inside your own Node process.
 
-> **Pre-release skeleton — not production ready, not published.** The public surface below is
-> stable, but every entry point currently throws
-> `EudikitError('INTERNAL', '… not implemented yet …')`. Exactly one module has real behaviour:
-> `src/mdoc/session-transcript.ts`.
+> **Pre-release — not production ready, not published.** The mdoc path is complete and tested;
+> SD-JWT VC verification still throws `EudikitError('INTERNAL', '… not implemented yet …')`.
 
-## What is actually implemented
+## What is implemented
 
-`src/mdoc/session-transcript.ts` + `src/mdoc/cbor.ts` — deterministic CBOR construction of
-`OpenID4VPHandover`, `OpenID4VPDCAPIHandover` and `SessionTranscript`.
+Request production (unsigned by-value, signed JAR by value or by `request_uri`), both response
+sides — `verify()` for the Digital Credentials API and `handleWalletResponse()` for
+`direct_post` / `direct_post.jwt` — the mdoc verification chain (issuer signature, value digests,
+device signature over the rebuilt SessionTranscript, validity windows), DCQL claim-level
+post-validation, the AV trusted list (ETSI TS 119 612 fetch, parse and DS byte-match), result
+polling, session adapters for memory/Redis/KV, and the HTTP handlers
+(`@eudikit/core/handler`, `@eudikit/core/next`).
 
-This is first on purpose. `DeviceSigned.deviceAuth` is a signature over these exact bytes, so if
-the encoding is off by one byte the device signature never validates and every later claim about
-"verified" is meaningless. The tests in `test/session-transcript.test.ts` assert byte equality
-against the hex vectors in **OpenID4VP 1.0 Final, Appendix B.2.6**, and additionally against
-`@owf/mdoc`'s own builder.
+The foundation under all of it is `src/mdoc/session-transcript.ts` + `src/mdoc/cbor.ts` —
+deterministic CBOR construction of `OpenID4VPHandover`, `OpenID4VPDCAPIHandover` and
+`SessionTranscript`.
+
+That module was written first on purpose. `DeviceSigned.deviceAuth` is a signature over these
+exact bytes, so if the encoding is off by one byte the device signature never validates and every
+later claim about "verified" is meaningless. The tests in `test/session-transcript.test.ts` assert
+byte equality against the hex vectors in **OpenID4VP 1.0 Final, Appendix B.2.6**, and additionally
+against `@owf/mdoc`'s own builder.
 
 The CBOR encoder is ours, ~90 dependency-free lines, deliberately not `cbor-x`: these structures
 get hashed, so the encoding must be deterministic, and `cbor-x` ships an `eval`-based decoder that

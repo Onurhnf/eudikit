@@ -6,7 +6,15 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**/*.ts", "**/*.tsx", "**/*.json", "**/*.jsonc", "!**/dist", "!**/*.d.ts"]
+    "includes": [
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.json",
+      "**/*.jsonc",
+      "!**/dist",
+      "!**/*.d.ts",
+      "!examples/next/tsconfig.json"
+    ]
   },
   "formatter": {
     "enabled": true,

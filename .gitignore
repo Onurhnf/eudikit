@@ -3,6 +3,8 @@ dist/
 *.tsbuildinfo
 .turbo/
 coverage/
+.next/
+next-env.d.ts
 
 # secrets and testbed material
 .env

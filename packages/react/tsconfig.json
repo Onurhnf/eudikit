@@ -11,5 +11,5 @@
     // (@types/react) and the DOM lib above.
     "types": []
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

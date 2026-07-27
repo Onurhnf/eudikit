@@ -1,0 +1,82 @@
+/*
+ * The whole stylesheet of the demo. @eudikit/react ships no CSS; it renders semantic markup with
+ * a root className and a data-eudikit-status attribute, and this file is what styling against
+ * those looks like.
+ */
+
+:root {
+  color-scheme: light dark;
+  --line: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+body {
+  margin: 0;
+  font: 16px/1.6 system-ui, sans-serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin-bottom: 0.25rem;
+}
+
+.lede {
+  opacity: 0.75;
+}
+
+.gate,
+.unlocked {
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  margin-top: 2rem;
+}
+
+.gate button {
+  font: inherit;
+  padding: 0.6rem 1.1rem;
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gate button[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.gate button + button {
+  margin-left: 0.5rem;
+}
+
+.gate [data-eudikit-panel] {
+  margin: 1.5rem 0;
+}
+
+/*
+ * An unsigned by-value request carries its whole DCQL query in the URI, so this QR code is
+ * around version 30 — dense enough that phone cameras want it big. The SVG scales; the width
+ * attribute is only its default.
+ */
+.gate svg {
+  border-radius: 0.5rem;
+  width: min(100%, 20rem);
+  height: auto;
+}
+
+.gate [role='alert'] {
+  color: #b3261e;
+}
+
+footer {
+  margin-top: 3rem;
+  font-size: 0.85rem;
+  opacity: 0.7;
+}

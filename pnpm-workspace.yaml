@@ -1,7 +1,8 @@
 packages:
   - 'packages/*'
-# examples/* and testbed/ stay outside the workspace on purpose: both are
-# documentation-only for now and join the workspace once they carry real code.
+  - 'examples/*'
+# testbed/ stays outside the workspace on purpose: it is docker and documentation,
+# with no package of its own to build.
 
 # pnpm 10: packages allowed to run their postinstall scripts.
 onlyBuiltDependencies:

@@ -4,18 +4,22 @@
  *
  * Freshness contract (no silent staleness, ever):
  *
- *  - A copy younger than `refreshIntervalSeconds` is served as fresh — no network touch.
- *  - When a refresh is due and the fetch succeeds, the new copy replaces the cached one.
- *  - When the fetch (or the parse of its body) fails and a cached copy exists, the stale copy
- *    IS used for matching but the snapshot reports `fresh: false`, which surfaces as a failed
- *    `trust.list_fresh` check — strict mode rejects, permissive mode warns.
+ *  - `refreshIntervalSeconds` is the re-fetch cadence: a copy younger than that is served
+ *    without touching the network.
+ *  - When a refresh is due and the fetch succeeds, the new copy replaces the cached one and is
+ *    fresh by definition — nothing more current exists.
+ *  - When the fetch (or the parse of its body) fails, the cached copy is still authoritative
+ *    until the moment the list itself declares: a list stays valid until its own `NextUpdate`,
+ *    which is the validity statement the scheme operator publishes it with (ETSI TS 119 612
+ *    §5.3.14). Inside that window the snapshot reports `fresh: true` and names the failed
+ *    refresh in its detail; past it — or with no `NextUpdate` to go on — the copy is still used
+ *    for matching but reports `fresh: false`, which surfaces as a failed `trust.list_fresh`
+ *    check: strict mode rejects, permissive mode warns.
  *  - With no cached copy at all, the snapshot reports `available: false`; membership cannot be
  *    evaluated and strict verification fails with `TRUSTED_LIST_UNAVAILABLE`.
  *
  * A corrupted download can never replace a good cache: the body is parsed before the cache is
- * written. Stale copies are retained for at most thirty days — past that a permanently failing
- * fetch degrades to "unavailable" rather than letting verification run on months-old trust
- * data indefinitely.
+ * written.
  *
  * The list's own XAdES signature is deliberately not verified in this release (the
  * `trust.list_signature_valid` check reports `skipped`); transport security rests on HTTPS.
@@ -42,14 +46,15 @@ export interface TrustedListSourceOptions {
   fetch: typeof fetch
 }
 
-/** How long a stale copy may keep serving after fetches start failing. */
-const STALE_RETENTION_SECONDS = 30 * 24 * 3600
+/** How long a downloaded copy is kept in the cache store; not a freshness rule. */
+const CACHE_RETENTION_SECONDS = 30 * 24 * 3600
 
 interface CachedList {
-  v: 1
+  v: 2
   fetchedAt: string
   sequenceNumber: number | null
   listIssueDateTime: string | null
+  nextUpdate: string | null
   services: Array<{
     tspName: string
     serviceName: string
@@ -81,10 +86,16 @@ export class TrustedListSource {
       return this.snapshot(refreshed, true)
     } catch (cause) {
       const reason = cause instanceof Error ? cause.message : String(cause)
-      if (cached !== null && this.age(cached, now) < STALE_RETENTION_SECONDS) {
-        const stale = this.snapshot(cached, false)
-        stale.detail = `refresh from ${this.options.url} failed (${reason}); serving the copy fetched ${cached.fetchedAt}`
-        return stale
+      if (cached !== null) {
+        const withinValidity = validUntil(cached) > now.getTime()
+        const served = this.snapshot(cached, withinValidity)
+        served.detail = withinValidity
+          ? `refresh from ${this.options.url} failed (${reason}); the copy fetched ` +
+            `${cached.fetchedAt} is still valid — the list declares NextUpdate ${cached.nextUpdate}`
+          : `refresh from ${this.options.url} failed (${reason}); serving the copy fetched ` +
+            `${cached.fetchedAt}, whose declared NextUpdate (${cached.nextUpdate ?? 'absent'}) ` +
+            'has passed'
+        return served
       }
       return {
         available: false,
@@ -115,10 +126,11 @@ export class TrustedListSource {
     }
     const parsed = parseTrustedListXml(await response.text())
     const record: CachedList = {
-      v: 1,
+      v: 2,
       fetchedAt: now.toISOString(),
       sequenceNumber: parsed.sequenceNumber,
       listIssueDateTime: parsed.listIssueDateTime,
+      nextUpdate: parsed.nextUpdate,
       services: parsed.services.map((service) => ({
         tspName: service.tspName,
         serviceName: service.serviceName,
@@ -127,7 +139,7 @@ export class TrustedListSource {
         certificates: service.certificates.map((der) => Buffer.from(der).toString('base64')),
       })),
     }
-    await this.options.cache.set(this.cacheKey, JSON.stringify(record), STALE_RETENTION_SECONDS)
+    await this.options.cache.set(this.cacheKey, JSON.stringify(record), CACHE_RETENTION_SECONDS)
     return record
   }
 
@@ -141,7 +153,7 @@ export class TrustedListSource {
     if (raw === null) return null
     try {
       const record = JSON.parse(raw) as CachedList
-      if (record.v !== 1 || !Array.isArray(record.services)) return null
+      if (record.v !== 2 || !Array.isArray(record.services)) return null
       return record
     } catch {
       return null
@@ -170,9 +182,20 @@ export class TrustedListSource {
       fetchedAt: new Date(cached.fetchedAt),
       detail:
         `sequence ${cached.sequenceNumber ?? 'unknown'}, issued ` +
-        `${cached.listIssueDateTime ?? 'unknown'}, fetched ${cached.fetchedAt}`,
+        `${cached.listIssueDateTime ?? 'unknown'}, next update ` +
+        `${cached.nextUpdate ?? 'unknown'}, fetched ${cached.fetchedAt}`,
     }
   }
+}
+
+/**
+ * The instant the cached list stops vouching for itself. An absent or unparseable `NextUpdate`
+ * yields zero, so a copy that never declared a validity end can never be counted as fresh.
+ */
+function validUntil(cached: CachedList): number {
+  if (cached.nextUpdate === null) return 0
+  const parsed = Date.parse(cached.nextUpdate)
+  return Number.isNaN(parsed) ? 0 : parsed
 }
 
 // ---------------------------------------------------------------------------

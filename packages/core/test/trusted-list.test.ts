@@ -152,15 +152,67 @@ describe('TrustedListSource — cache and freshness', () => {
     expect(scripted.calls()).toBe(2)
   })
 
-  it('serves the stale copy loudly when the refresh fails', async () => {
+  it('keeps a cached copy fresh while its own NextUpdate stands, and names the failed refresh', async () => {
     const { source: tl } = source([xml, new Error('connect ETIMEDOUT')])
+    await tl.getSnapshot(FIXED_NOW)
+    const served = await tl.getSnapshot(new Date(FIXED_NOW.getTime() + 2 * 3600_000))
+    expect(served.available).toBe(true)
+    expect(served.fresh).toBe(true)
+    expect(served.services).toHaveLength(1)
+    expect(served.detail).toContain('ETIMEDOUT')
+    expect(served.detail).toContain('2026-12-31T00:00:00Z')
+  })
+
+  it('marks a cached copy stale once its NextUpdate has passed', async () => {
+    const shortLived = buildTrustedListXml(
+      [
+        {
+          tspName: 'Cache TSP',
+          serviceName: 'Cache Service',
+          status: 'recognized',
+          certificates: [issuer.certificate],
+        },
+      ],
+      { nextUpdate: '2026-07-27T13:00:00Z' }
+    )
+    const { source: tl } = source([shortLived, new Error('connect ETIMEDOUT')])
     await tl.getSnapshot(FIXED_NOW)
     const stale = await tl.getSnapshot(new Date(FIXED_NOW.getTime() + 2 * 3600_000))
     expect(stale.available).toBe(true)
     expect(stale.fresh).toBe(false)
+    // Matching still runs against it — the caller decides what a stale list is worth.
     expect(stale.services).toHaveLength(1)
-    expect(stale.detail).toContain('refresh')
-    expect(stale.detail).toContain('ETIMEDOUT')
+    expect(stale.detail).toContain('has passed')
+  })
+
+  it('treats a list with no NextUpdate as stale as soon as a refresh fails', async () => {
+    const undated = buildTrustedListXml(
+      [
+        {
+          tspName: 'T',
+          serviceName: 'S',
+          status: 'recognized',
+          certificates: [issuer.certificate],
+        },
+      ],
+      { nextUpdate: '' }
+    )
+    const { source: tl } = source([undated, new Error('offline')])
+    await tl.getSnapshot(FIXED_NOW)
+    const stale = await tl.getSnapshot(new Date(FIXED_NOW.getTime() + 2 * 3600_000))
+    expect(stale.fresh).toBe(false)
+    expect(stale.detail).toContain('absent')
+  })
+
+  it("honours the real EU list's NextUpdate on both sides of it", async () => {
+    // The frozen acceptance list declares NextUpdate 2026-12-16T13:30:00Z.
+    const { source: tl } = source([FIXTURE_XML, new Error('offline'), new Error('offline')])
+    await tl.getSnapshot(FIXED_NOW)
+    const before = await tl.getSnapshot(new Date('2026-12-16T13:29:00Z'))
+    const after = await tl.getSnapshot(new Date('2026-12-16T13:31:00Z'))
+    expect(before.fresh).toBe(true)
+    expect(after.fresh).toBe(false)
+    expect(after.services).toHaveLength(12)
   })
 
   it('reports unavailable when the fetch fails and no cache exists', async () => {
@@ -176,8 +228,8 @@ describe('TrustedListSource — cache and freshness', () => {
     await tl.getSnapshot(FIXED_NOW)
     const afterBadBody = await tl.getSnapshot(new Date(FIXED_NOW.getTime() + 2 * 3600_000))
     expect(afterBadBody.available).toBe(true)
-    expect(afterBadBody.fresh).toBe(false)
     expect(afterBadBody.services).toHaveLength(1)
+    expect(afterBadBody.detail).toContain('missing root element')
   })
 
   it('treats a non-200 response as a fetch failure', async () => {
@@ -406,7 +458,7 @@ describe('trusted list — end-to-end trust decisions', () => {
     expect(statusOf(status.result.diagnostics, 'trust.list_fresh')).toEqual(['failed'])
   })
 
-  it('uses a stale cached list loudly: strict rejects, the report names the stale copy', async () => {
+  it('verifies on a cached list whose NextUpdate still stands when the refresh fails', async () => {
     let clock = FIXED_NOW
     const { verifier } = makeListVerifier({
       fetchScript: [LISTED_XML, new Error('connect ETIMEDOUT')],
@@ -416,8 +468,40 @@ describe('trusted list — end-to-end trust decisions', () => {
     const firstSession = await respond(verifier, issuer)
     expect((await verifier.getResult(firstSession)).status).toBe('verified')
 
-    // Past the refresh interval the fetch starts failing; the stale copy still matches but
-    // trust.list_fresh fails — no silent staleness, and strict mode does not pass on it.
+    // The refresh cadence has elapsed and the network is gone, but the list vouches for itself
+    // until 2026-12-31 — an outage at the scheme operator does not take verification down.
+    clock = new Date(FIXED_NOW.getTime() + 2 * 3600_000)
+    const secondSession = await respond(verifier, issuer)
+    const status = await verifier.getResult(secondSession)
+    if (status.status !== 'verified') {
+      throw new Error(`expected verified: ${JSON.stringify(status)}`)
+    }
+    const freshRow = status.result.diagnostics.find((check) => check.id === 'trust.list_fresh')
+    expect(freshRow?.status).toBe('passed')
+    expect(freshRow?.detail).toContain('ETIMEDOUT')
+  })
+
+  it('rejects in strict mode once the cached list is past its own NextUpdate', async () => {
+    let clock = FIXED_NOW
+    const expiringXml = buildTrustedListXml(
+      [
+        {
+          tspName: 'Example Trust Services',
+          serviceName: 'Example Age Attestation Service',
+          status: 'recognized',
+          certificates: [issuer.certificate],
+        },
+      ],
+      { nextUpdate: '2026-07-27T13:00:00Z' }
+    )
+    const { verifier } = makeListVerifier({
+      fetchScript: [expiringXml, new Error('connect ETIMEDOUT')],
+      now: () => clock,
+    })
+
+    const firstSession = await respond(verifier, issuer)
+    expect((await verifier.getResult(firstSession)).status).toBe('verified')
+
     clock = new Date(FIXED_NOW.getTime() + 2 * 3600_000)
     const secondSession = await respond(verifier, issuer)
     const status = await verifier.getResult(secondSession)
@@ -425,7 +509,7 @@ describe('trusted list — end-to-end trust decisions', () => {
     expect(status.result.error?.code).toBe('VERIFICATION_FAILED')
     const freshRow = status.result.diagnostics.find((check) => check.id === 'trust.list_fresh')
     expect(freshRow?.status).toBe('failed')
-    expect(freshRow?.detail).toContain('serving the copy fetched')
+    expect(freshRow?.detail).toContain('has passed')
     // Membership itself was still evaluated against the stale data.
     expect(statusOf(status.result.diagnostics, 'trust.issuer_in_trusted_list')).toEqual(['passed'])
   })

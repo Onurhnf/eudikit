@@ -15,7 +15,15 @@ export interface SyntheticService {
 const STATUS_BASE = 'http://trust.tech.ec.europa.eu/lists/age-verification/service-status'
 const SERVICE_TYPE = 'http://trust.tech.ec.europa.eu/lists/age-verification/service-type/paa'
 
-export function buildTrustedListXml(services: SyntheticService[]): string {
+export interface SyntheticListOptions {
+  /** The list's own validity statement — the freshness rule for cached copies. */
+  nextUpdate?: string
+}
+
+export function buildTrustedListXml(
+  services: SyntheticService[],
+  options: SyntheticListOptions = {}
+): string {
   const providers = services
     .map(
       (service) => `
@@ -51,7 +59,7 @@ export function buildTrustedListXml(services: SyntheticService[]): string {
     <TSLVersionIdentifier>6</TSLVersionIdentifier>
     <TSLSequenceNumber>1</TSLSequenceNumber>
     <ListIssueDateTime>2026-07-01T00:00:00Z</ListIssueDateTime>
-    <NextUpdate><dateTime>2026-12-31T00:00:00Z</dateTime></NextUpdate>
+    <NextUpdate><dateTime>${options.nextUpdate ?? '2026-12-31T00:00:00Z'}</dateTime></NextUpdate>
   </SchemeInformation>
   <TrustServiceProviderList>${providers}
   </TrustServiceProviderList>

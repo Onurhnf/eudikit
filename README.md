@@ -11,17 +11,16 @@ point is that the verification runs where your code runs.
 
 ## Status: pre-release — NOT production ready
 
-This repository is a **skeleton**. Today it contains the full public API surface as typed
-stubs and exactly one implemented module: deterministic CBOR `SessionTranscript` / handover
-construction, validated byte-for-byte against the OpenID4VP 1.0 Appendix B.2.6 test vectors.
-Everything else in the public surface throws. Nothing here is published to npm, and no part
-of it should be used to make a real access-control decision.
+The mdoc path works end to end, against the OpenID4VP 1.0 test vectors and a real EU trusted
+list, but nothing here has met a wallet on a physical device yet and nothing is published to
+npm. Do not use it to make a real access-control decision.
 
 | Package | State |
 |---|---|
-| `@eudikit/core` | types + `mdoc/session-transcript` implemented; verifier engine stubbed |
-| `@eudikit/react` | stub (`<AgeGate/>`, `useVerification`) |
+| `@eudikit/core` | request production, `direct_post` and DC API response handling, the full mdoc verification chain, DCQL post-validation, the AV trusted list, session adapters, HTTP handlers. SD-JWT VC verification still throws. |
+| `@eudikit/react` | `useVerification()` and `<AgeGate/>`: DC API negotiation, QR fallback, polling |
 | `@eudikit/expo` | stub — v1 scope is deep-link/QR only, native path deferred to v1.1 |
+| `examples/next` | a working age gate: [`examples/next`](examples/next) |
 
 ## What v1 will and will not do
 
