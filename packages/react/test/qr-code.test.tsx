@@ -1,6 +1,7 @@
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
-import { QrCode } from '../src/qr-code.js'
+import { en } from '../src/locales/index.js'
+import { QrCode, VerificationQr } from '../src/qr-code.js'
 
 afterEach(cleanup)
 
@@ -34,5 +35,33 @@ describe('<QrCode/>', () => {
     expect(edge(long)).toBeGreaterThan(edge(short))
     expect(long?.getAttribute('width')).toBe('320')
     expect(long?.getAttribute('aria-label')).toBe('Scan me')
+  })
+})
+
+describe('<VerificationQr/>', () => {
+  it('renders the payload with the catalog default label and forwards data attributes', () => {
+    const { container } = render(
+      <VerificationQr
+        payload="eudi-openid4vp://authorize?client_id=x"
+        data-part="qr"
+        data-state="polling"
+      />
+    )
+    const svg = container.querySelector('svg')
+    expect(svg?.getAttribute('role')).toBe('img')
+    expect(svg?.getAttribute('aria-label')).toBe(en.qrLabel)
+    expect(svg?.getAttribute('data-part')).toBe('qr')
+    expect(svg?.getAttribute('data-state')).toBe('polling')
+    expect(svg?.querySelector('path')?.getAttribute('d')).toContain('M')
+  })
+
+  it('honours size, className and label like the underlying <QrCode/>', () => {
+    const { container } = render(
+      <VerificationQr payload="a" size={320} className="qr" label="Scan me" />
+    )
+    const svg = container.querySelector('svg')
+    expect(svg?.getAttribute('width')).toBe('320')
+    expect(svg?.getAttribute('class')).toBe('qr')
+    expect(svg?.getAttribute('aria-label')).toBe('Scan me')
   })
 })

@@ -9,10 +9,14 @@
  * Two fixed choices, both about actually being scannable rather than about looks: the quiet
  * zone is the four modules the QR specification asks for, and the colours are hard dark-on-light
  * (a QR code inverted to match a dark theme does not scan on many readers).
+ *
+ * `<VerificationQr/>` is the same component under its task-shaped name: it takes the hook's
+ * `qrPayload` as `payload` and forwards everything else.
  */
 
 import { type ReactElement, useMemo } from 'react'
 import { encode } from 'uqr'
+import { en } from './locales/en.js'
 
 /** Modules of quiet zone around the symbol (ISO/IEC 18004 §6.3.8). */
 const QUIET_ZONE = 4
@@ -23,15 +27,18 @@ export interface QrCodeProps {
   /** Rendered edge length in CSS pixels. Default 240. */
   size?: number
   className?: string
-  /** Accessible name of the image. */
+  /** Accessible name of the image. Default: the English catalog's `qrLabel`. */
   label?: string
+  /** `data-*` attributes are forwarded to the `<svg>` element for the styling contract. */
+  [dataAttribute: `data-${string}`]: string | undefined
 }
 
 export function QrCode({
   value,
   size = 240,
   className,
-  label = 'Wallet request QR code',
+  label = en.qrLabel,
+  ...dataAttributes
 }: QrCodeProps): ReactElement {
   const { modules, path } = useMemo(() => {
     // Error correction stays at the lowest level on purpose: an unsigned by-value request
@@ -50,11 +57,29 @@ export function QrCode({
       role="img"
       aria-label={label}
       className={className}
+      {...dataAttributes}
     >
       <rect width={modules} height={modules} fill="#ffffff" />
       <path d={path} fill="#000000" />
     </svg>
   )
+}
+
+export interface VerificationQrProps {
+  /** The wallet URI to encode — `qrPayload` from `useVerification()`. */
+  payload: string
+  /** Rendered edge length in CSS pixels. Default 240. */
+  size?: number
+  className?: string
+  /** Accessible name of the image. Default: the English catalog's `qrLabel`. */
+  label?: string
+  /** `data-*` attributes are forwarded to the `<svg>` element for the styling contract. */
+  [dataAttribute: `data-${string}`]: string | undefined
+}
+
+/** The QR code under the name the verification flow uses: `payload` in, one `<svg>` out. */
+export function VerificationQr({ payload, ...rest }: VerificationQrProps): ReactElement {
+  return <QrCode value={payload} {...rest} />
 }
 
 /** One `<path>` for the whole symbol: a unit square per dark module. */

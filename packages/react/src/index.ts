@@ -15,11 +15,27 @@
  * Server Component can import `<AgeGate/>` and render it without a wrapper. Server *rendering*
  * still works — importing this module touches neither `window` nor `document`, and every browser
  * API is reached from an event handler or an effect.
+ *
+ * The label catalogs (plain data, usable in server components) live at `@eudikit/react/locales`.
  */
 
-export { AgeGate, type AgeGateProps } from './age-gate.js'
+export { AgeGate, type AgeGateProps, type AgeGateRenderState } from './age-gate.js'
 export { DC_API_PROTOCOLS, digitalCredentialsAvailable } from './dc-api.js'
-export { QrCode, type QrCodeProps } from './qr-code.js'
+export {
+  type EudikitReactLabels,
+  type EudikitReactLabelsOverrides,
+  getErrorText,
+  getLabels,
+  isUserFacingErrorCode,
+  type Locale,
+  type UserFacingErrorCode,
+} from './labels.js'
+export {
+  QrCode,
+  type QrCodeProps,
+  VerificationQr,
+  type VerificationQrProps,
+} from './qr-code.js'
 export {
   type UseVerificationOptions,
   type UseVerificationResult,

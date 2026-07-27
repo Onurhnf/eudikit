@@ -13,11 +13,20 @@ describe('server rendering', () => {
     expect(typeof globalThis.window).toBe('undefined')
     expect(typeof globalThis.document).toBe('undefined')
 
-    const { AgeGate, digitalCredentialsAvailable, QrCode, useVerification } = await import(
-      '../src/index.js'
-    )
+    const {
+      AgeGate,
+      digitalCredentialsAvailable,
+      getLabels,
+      QrCode,
+      useVerification,
+      VerificationQr,
+    } = await import('../src/index.js')
     expect(typeof useVerification).toBe('function')
     expect(digitalCredentialsAvailable()).toBe(false)
+
+    // The catalogs are plain data and safe in a server module graph.
+    const { tr } = await import('../src/locales/index.js')
+    expect(getLabels('tr').trigger).toBe(tr.trigger)
 
     const { renderToStaticMarkup } = await import('react-dom/server')
     const html = renderToStaticMarkup(
@@ -28,10 +37,15 @@ describe('server rendering', () => {
 
     expect(html).toContain('Verify your age with your wallet')
     expect(html).toContain('data-eudikit-status="idle"')
+    expect(html).toContain('data-state="idle"')
+    expect(html).toContain('lang="en"')
     // The gate is closed on the server: protected content is never sent to an unverified client.
     expect(html).not.toContain('Adults only')
 
-    // The QR renderer is pure markup, so it server-renders too.
+    // The QR renderers are pure markup, so they server-render too.
     expect(renderToStaticMarkup(<QrCode value="eudi-openid4vp://authorize" />)).toContain('<svg')
+    expect(renderToStaticMarkup(<VerificationQr payload="eudi-openid4vp://authorize" />)).toContain(
+      '<svg'
+    )
   })
 })
