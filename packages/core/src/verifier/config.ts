@@ -56,6 +56,8 @@ export interface ResolvedVerifierConfig {
   clientId: string | null
   /** Normalized (no trailing slash); `null` when neither config nor env provides one. */
   publicBaseUrl: string | null
+  /** Development switch: accept a loopback `publicBaseUrl` on the QR and deep-link channels. */
+  allowInsecureLoopback: boolean
   /** Normalized: leading slash, no trailing slash; `''` when mounted at the root. */
   routeBasePath: string
   session: SessionAdapter
@@ -79,6 +81,10 @@ const TUNNEL_HINT =
   'cross-device flows need a publicly reachable HTTPS base URL — the DC API flow works on ' +
   'localhost; use e.g. `cloudflared tunnel --url http://localhost:3000` during development'
 
+const LOOPBACK_HINT =
+  'a phone wired to this machine is the other route: `adb reverse tcp:3000 tcp:3000` plus ' +
+  '`allowInsecureLoopback: true` makes an http://localhost base URL usable'
+
 function invalid(detail: string): never {
   throw new EudikitError('CONFIG_INVALID', detail)
 }
@@ -99,8 +105,9 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
 
   const session = resolveSession(config.session)
   const fetchImpl = resolveFetch(config.fetch)
+  const allowInsecureLoopback = resolveAllowInsecureLoopback(config.allowInsecureLoopback)
 
-  return {
+  const resolved: ResolvedVerifierConfig = {
     profile: validateProfile(config.profile, 'config.profile'),
     clientIdPrefix:
       config.clientIdPrefix === undefined
@@ -108,6 +115,7 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
         : validateClientIdPrefix(config.clientIdPrefix, 'config.clientIdPrefix'),
     clientId: resolveClientId(config.clientId),
     publicBaseUrl: resolvePublicBaseUrl(config.publicBaseUrl),
+    allowInsecureLoopback,
     routeBasePath: resolveRouteBasePath(config.routeBasePath),
     session,
     keys: resolveKeys(config.keys),
@@ -125,6 +133,30 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
     fetch: fetchImpl,
     now: config.now ?? (() => new Date()),
   }
+
+  // Announced once the rest of the config is known to be sound, so a verifier that never boots
+  // does not leave a warning behind.
+  if (allowInsecureLoopback) warnInsecureLoopback()
+
+  return resolved
+}
+
+function resolveAllowInsecureLoopback(value: unknown): boolean {
+  if (value === undefined) return false
+  if (typeof value !== 'boolean') {
+    invalid(`config.allowInsecureLoopback must be a boolean, got ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+function warnInsecureLoopback(): void {
+  console.warn(
+    '[eudikit] allowInsecureLoopback is on: the QR and deep-link channels accept an http:// ' +
+      'loopback publicBaseUrl. This is a development switch for a phone wired to this machine ' +
+      'with `adb reverse tcp:3000 tcp:3000`, where wallet traffic never leaves the cable. Never ' +
+      'enable it in production: anywhere else the response crosses a network that only TLS ' +
+      'protects.'
+  )
 }
 
 /**
@@ -433,6 +465,10 @@ export function validateExpectedOrigins(origins: readonly unknown[], source: str
 /**
  * The QR/deep-link precondition: the wallet's phone must be able to reach us. Returns the
  * normalized base URL or throws the explanatory config error.
+ *
+ * `allowInsecureLoopback` opens exactly one door here — a loopback host, which a phone can
+ * reach when it is wired to this machine and the port is forwarded. Every other host keeps the
+ * https requirement, flag or no flag.
  */
 export function requirePublicBaseUrl(
   config: ResolvedVerifierConfig,
@@ -443,7 +479,7 @@ export function requirePublicBaseUrl(
     throw new EudikitError(
       'CONFIG_PUBLIC_BASE_URL_REQUIRED',
       `channel '${channel}' has no public base URL: set publicBaseUrl or the ` +
-        `${PUBLIC_BASE_URL_ENV} env var. Note that ${TUNNEL_HINT}`
+        `${PUBLIC_BASE_URL_ENV} env var. Note that ${TUNNEL_HINT}; ${LOOPBACK_HINT}`
     )
   }
 
@@ -451,17 +487,18 @@ export function requirePublicBaseUrl(
   if (url === null) invalid(`publicBaseUrl "${base}" is not a valid URL`)
 
   if (isLoopbackHost(url.hostname)) {
+    if (config.allowInsecureLoopback) return base
     throw new EudikitError(
       'CONFIG_PUBLIC_BASE_URL_REQUIRED',
       `publicBaseUrl "${base}" is only reachable on this machine, not from the wallet's phone: ` +
-        TUNNEL_HINT
+        `${TUNNEL_HINT}; ${LOOPBACK_HINT}`
     )
   }
   if (url.protocol !== 'https:') {
     throw new EudikitError(
       'CONFIG_PUBLIC_BASE_URL_NOT_HTTPS',
       `publicBaseUrl "${base}" must use https: wallets refuse to post credentials to a ` +
-        `plain-http response endpoint`
+        `plain-http response endpoint. Only loopback is exempt — ${LOOPBACK_HINT}`
     )
   }
   return base

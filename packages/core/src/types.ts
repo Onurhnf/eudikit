@@ -79,9 +79,24 @@ export interface VerifierConfig {
    * - When `requests.create({ channel: 'qr' | 'deep-link' })` runs, a missing or localhost
    *   value throws `CONFIG_PUBLIC_BASE_URL_REQUIRED` with a message describing the tunnel
    *   (cloudflared/ngrok) route, and a plain-http value throws
-   *   `CONFIG_PUBLIC_BASE_URL_NOT_HTTPS`.
+   *   `CONFIG_PUBLIC_BASE_URL_NOT_HTTPS`. A localhost value is accepted only under
+   *   `allowInsecureLoopback`.
    */
   publicBaseUrl?: string
+
+  /**
+   * Development switch: accept a loopback `publicBaseUrl` — `localhost`, `*.localhost`,
+   * `127.0.0.1`, `[::1]` — over plain http on the QR and deep-link channels, which otherwise
+   * demand a publicly reachable https URL. Default `false`.
+   *
+   * It exists for a phone wired to the development machine with `adb reverse tcp:3000 tcp:3000`:
+   * that traffic never leaves the USB cable, so there is no network path for TLS to protect —
+   * in every other setup the wallet's response crosses a real network and https is mandatory.
+   *
+   * Nothing else relaxes. A non-loopback host is still rejected (`http://192.168.1.10` included),
+   * and signature, nonce, audience and origin checks are untouched.
+   */
+  allowInsecureLoopback?: boolean
 
   /** Path the handler is mounted at; `request_uri`/`response_uri` derive from it. Default `/api/eudikit`. */
   routeBasePath?: string

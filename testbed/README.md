@@ -90,7 +90,41 @@ cd av-srv-trust-validator && ./gradlew bootRun --args='--server.port=8082'
 Verified against a real `Age Verification DS - 001` certificate pulled from the live list:
 `{"trusted": true, "trustAnchor": "…"}` in 44 ms.
 
-## 5. What this rig is for
+## 5. Device day checklist
+
+The order to work through with a phone on the desk. Nothing in this section has been run end to
+end yet — that is what the day is for — so every step carries the thing to look at when it stalls.
+
+1. **Install the wallet.** The APK and the two `adb` commands are in §2. `adb devices` has to list
+   the phone as `device`; `unauthorized` means the USB-debugging prompt on the phone was never
+   accepted.
+2. **Get a Proof-of-Age attestation onto it.** Use the wallet's own add-document flow against the
+   EU demo issuer — issuance is not reproduced locally (§1). *No credential afterwards:* the phone
+   needs plain internet for this step, not the USB forward, and the wallet reports issuer errors in
+   its own UI rather than at presentation time.
+3. **Forward the port.** `adb reverse tcp:3000 tcp:3000`. *It is per-connection:* unplugging the
+   phone or restarting `adb` drops it silently, and the next request just times out.
+4. **Start the example app in USB mode.**
+   ```bash
+   EUDIKIT_PUBLIC_BASE_URL=http://localhost:3000 EUDIKIT_ALLOW_INSECURE_LOOPBACK=1 pnpm --filter @eudikit/example-next dev
+   ```
+   *Request creation throws `CONFIG_PUBLIC_BASE_URL_*`:* one of the two variables did not reach the
+   process. The boot log prints the insecure-loopback warning when the switch is on.
+5. **Open `http://localhost:3000` in the phone's browser.** *Page does not load:* step 3 is not up —
+   the wallet is not involved yet. A tunnel URL (`examples/next/README.md`) is the alternative when
+   the forward cannot be made to work.
+6. **Press the same-device link, not the QR code.** The QR is for scanning from a second device.
+   *Nothing opens:* the deep-link scheme this build registers is not `eudi-openid4vp` — check the
+   installed APK's intent filters and override it per request with `scheme`.
+7. **Approve in the wallet, then watch the page.** The result appears through polling.
+   *Approved but the page never resolves:* the wallet could not POST back — the response goes to
+   `http://localhost:3000/api/eudikit/wallet/response` over the same forward, so check the server
+   log for the request arriving at all.
+8. **Read the verdict.** A `verified: false` in strict mode is a real answer, not a failure of the
+   rig: the demo issuer is on the live AV list (§3), so a trust failure here is worth diffing
+   against the reference verifier (§1) check by check.
+
+## 6. What this rig is for
 
 Two things, in this order:
 

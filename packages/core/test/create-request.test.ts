@@ -205,14 +205,16 @@ describe('requests.create — public base URL preconditions', () => {
       'CONFIG_PUBLIC_BASE_URL_REQUIRED'
     )
     expect(error.message).toContain('localhost')
+    expect(error.message).toContain('adb reverse tcp:3000 tcp:3000')
   })
 
   it('throws CONFIG_PUBLIC_BASE_URL_NOT_HTTPS for a plain-http base URL', async () => {
     const { verifier } = makeVerifier({ publicBaseUrl: 'http://av-demo.example' })
-    await expectEudikitError(
+    const error = await expectEudikitError(
       () => verifier.requests.create({ preset: agePreset, channel: 'deep-link' }),
       'CONFIG_PUBLIC_BASE_URL_NOT_HTTPS'
     )
+    expect(error.message).toContain('Only loopback is exempt')
   })
 
   it('falls back to the EUDIKIT_PUBLIC_BASE_URL env var', async () => {
@@ -223,6 +225,57 @@ describe('requests.create — public base URL preconditions', () => {
     )
     const params = queryParams(created.deepLink)
     expect(params.get('response_uri')).toBe('https://tunnel.example/api/eudikit/wallet/response')
+  })
+})
+
+describe('requests.create — allowInsecureLoopback', () => {
+  it.each([
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://[::1]:3000',
+    'http://app.localhost:3000',
+  ])('accepts the loopback base URL %s when the switch is on', async (publicBaseUrl) => {
+    const { verifier } = makeVerifier({ publicBaseUrl, allowInsecureLoopback: true })
+    const created = asDeepLink(
+      await verifier.requests.create({ preset: agePreset, channel: 'deep-link' })
+    )
+    expect(queryParams(created.deepLink).get('response_uri')).toBe(
+      `${publicBaseUrl}/api/eudikit/wallet/response`
+    )
+  })
+
+  it('still refuses the same base URL without the switch', async () => {
+    const { verifier } = makeVerifier({ publicBaseUrl: 'http://localhost:3000' })
+    await expectEudikitError(
+      () => verifier.requests.create({ preset: agePreset, channel: 'qr' }),
+      'CONFIG_PUBLIC_BASE_URL_REQUIRED'
+    )
+  })
+
+  it.each(['http://192.168.1.10:3000', 'http://av-demo.example'])(
+    'still refuses the non-loopback base URL %s with the switch on',
+    async (publicBaseUrl) => {
+      const { verifier } = makeVerifier({ publicBaseUrl, allowInsecureLoopback: true })
+      await expectEudikitError(
+        () => verifier.requests.create({ preset: agePreset, channel: 'qr' }),
+        'CONFIG_PUBLIC_BASE_URL_NOT_HTTPS'
+      )
+    }
+  )
+
+  it('warns at boot only — not once per request', async () => {
+    const warn = vi.mocked(console.warn)
+    warn.mockClear()
+    const { verifier } = makeVerifier({
+      publicBaseUrl: 'http://localhost:3000',
+      allowInsecureLoopback: true,
+    })
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    await verifier.requests.create({ preset: agePreset, channel: 'qr' })
+    await verifier.requests.create({ preset: agePreset, channel: 'deep-link' })
+
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })
 

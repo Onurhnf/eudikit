@@ -36,8 +36,40 @@ reach it — `direct_post` means the wallet POSTs its response straight to this 
 | Variable | Required | Meaning |
 |---|---|---|
 | `EUDIKIT_PUBLIC_BASE_URL` | yes, for QR and deep link | Public HTTPS origin of this app; `response_uri` is derived from it. Missing or `localhost` fails loudly at request creation instead of producing a URI nothing can answer. |
+| `EUDIKIT_ALLOW_INSECURE_LOOPBACK` | no | `1` accepts an `http://localhost` base URL, for the USB flow below. Development only; never set it in production. |
 | `EUDIKIT_TRUST_MODE` | no | `strict` (default) or `permissive`. Permissive downgrades *trust* checks to warnings — signatures, digests, device authentication and nonce binding never relax — and the result reports which mode produced it. |
 | `EUDIKIT_TRUST_ANCHORS` | no | PEM certificates for an issuer that is not on the AV trusted list, e.g. a local testbed. Additive: the trusted list still applies. |
+
+## Run it over USB (no tunnel)
+
+An Android phone plugged into the development machine can reach `localhost` directly, which skips
+the tunnel entirely — useful when the network is hostile or the tunnel URL keeps changing. Forward
+port 3000 from the phone to this machine:
+
+```bash
+adb reverse tcp:3000 tcp:3000
+```
+
+Then start the app pointing at loopback, with the development switch that permits it:
+
+```bash
+EUDIKIT_PUBLIC_BASE_URL=http://localhost:3000 EUDIKIT_ALLOW_INSECURE_LOOPBACK=1 pnpm --filter @eudikit/example-next dev
+```
+
+Open `http://localhost:3000` in the phone's own browser — `adb reverse` sends it to this machine —
+and use the same-device link rather than the QR code. The wallet POSTs its response back over the
+same forwarded port.
+
+`EUDIKIT_ALLOW_INSECURE_LOOPBACK` buys exactly one thing: a plain-http loopback
+`EUDIKIT_PUBLIC_BASE_URL` is accepted. Traffic over the cable never touches a network, so there is
+nothing here for TLS to protect; a LAN address such as `http://192.168.1.10:3000` is still refused,
+and no verification check changes. It is a development switch — the server prints a warning at boot
+saying so.
+
+**When it does not work:** `adb reverse` is per-connection, so re-run it after unplugging the phone
+or restarting `adb`. `adb devices` must list the phone as `device`, not `unauthorized`. If the page
+does not load in the phone's browser, the forward is not up — nothing about the wallet is involved
+yet.
 
 ## Why there is no Digital Credentials API button
 

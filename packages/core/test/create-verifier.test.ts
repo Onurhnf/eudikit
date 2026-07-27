@@ -147,6 +147,14 @@ describe('createVerifier — publicBaseUrl and TTLs', () => {
     expect(() => createVerifier(config({ publicBaseUrl: 'http://localhost:3000' }))).not.toThrow()
   })
 
+  it('rejects a non-boolean allowInsecureLoopback', async () => {
+    const error = await expectEudikitError(
+      () => createVerifier(config({ allowInsecureLoopback: 'yes' as unknown as boolean })),
+      'CONFIG_INVALID'
+    )
+    expect(error.message).toContain('allowInsecureLoopback')
+  })
+
   it('rejects non-positive TTLs', async () => {
     await expectEudikitError(
       () => createVerifier(config({ requestTtlSeconds: 0 })),
@@ -156,6 +164,55 @@ describe('createVerifier — publicBaseUrl and TTLs', () => {
       () => createVerifier(config({ resultTtlSeconds: -5 })),
       'CONFIG_INVALID'
     )
+  })
+})
+
+describe('createVerifier — allowInsecureLoopback', () => {
+  /** Keeps the default in-memory adapter — which warns on its own — out of the warning count. */
+  const session: SessionAdapter = {
+    async set() {},
+    async consume() {
+      return null
+    },
+    async get() {
+      return null
+    },
+    async delete() {},
+  }
+
+  it('announces the switch once at boot, naming the USB scenario and production', () => {
+    const warn = vi.mocked(console.warn)
+    warn.mockClear()
+
+    createVerifier(config({ session, allowInsecureLoopback: true }))
+
+    expect(warn).toHaveBeenCalledTimes(1)
+    const message = String(warn.mock.calls[0]?.[0])
+    expect(message).toContain('allowInsecureLoopback')
+    expect(message).toContain('adb reverse tcp:3000 tcp:3000')
+    expect(message).toContain('Never enable it in production')
+  })
+
+  it('stays silent when the switch is off or absent', () => {
+    const warn = vi.mocked(console.warn)
+    warn.mockClear()
+
+    createVerifier(config({ session }))
+    createVerifier(config({ session, allowInsecureLoopback: false }))
+
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('does not warn for a config that fails validation afterwards', async () => {
+    const warn = vi.mocked(console.warn)
+    warn.mockClear()
+
+    await expectEudikitError(
+      () => createVerifier(config({ session, allowInsecureLoopback: true, requestTtlSeconds: 0 })),
+      'CONFIG_INVALID'
+    )
+
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

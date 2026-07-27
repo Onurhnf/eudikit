@@ -10,7 +10,8 @@ import { createVerifier, memorySessionAdapter, type Verifier } from '@eudikit/co
  * `publicBaseUrl` is the one setting that must be right. The wallet runs on a phone, so it has
  * to reach this server over public HTTPS — point `EUDIKIT_PUBLIC_BASE_URL` at your tunnel (see
  * the README). Without it, request creation fails loudly rather than producing a URL nothing can
- * reach.
+ * reach. The exception is a phone on the USB cable with the port forwarded, which is what
+ * `EUDIKIT_ALLOW_INSECURE_LOOPBACK` is for.
  *
  * The in-memory session store is fine for a demo on one machine and wrong for anything with more
  * than one instance; production deployments pass `redisSessionAdapter(...)` or
@@ -19,6 +20,14 @@ import { createVerifier, memorySessionAdapter, type Verifier } from '@eudikit/co
 
 const publicBaseUrl = process.env.EUDIKIT_PUBLIC_BASE_URL
 const trustMode = process.env.EUDIKIT_TRUST_MODE === 'permissive' ? 'permissive' : 'strict'
+
+/**
+ * Development only: lets `publicBaseUrl` be `http://localhost:3000` so a phone reached over
+ * `adb reverse tcp:3000 tcp:3000` can answer without a tunnel. Nothing else relaxes.
+ */
+const allowInsecureLoopback =
+  process.env.EUDIKIT_ALLOW_INSECURE_LOOPBACK === '1' ||
+  process.env.EUDIKIT_ALLOW_INSECURE_LOOPBACK === 'true'
 
 /**
  * PEM certificates, newline-separated, for a local issuer that is not on the AV trusted list —
@@ -30,6 +39,7 @@ function build(): Verifier {
   return createVerifier({
     profile: 'av',
     ...(publicBaseUrl !== undefined ? { publicBaseUrl } : {}),
+    ...(allowInsecureLoopback ? { allowInsecureLoopback } : {}),
     session: memorySessionAdapter(),
     trust: {
       mode: trustMode,
