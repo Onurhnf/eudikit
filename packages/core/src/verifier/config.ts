@@ -9,29 +9,71 @@
  * DC-API-only verifier therefore keeps working on localhost with zero public infrastructure.
  */
 
-import { notImplemented } from '../internal/not-implemented.js'
+import {
+  createHash,
+  createPrivateKey,
+  type JsonWebKey,
+  type KeyObject,
+  X509Certificate,
+} from 'node:crypto'
 import { memorySessionAdapter } from '../session/memory.js'
-import type { ClientIdPrefix, SessionAdapter, VerifierConfig, WalletProfile } from '../types.js'
+import {
+  memoryTrustCache,
+  sessionAdapterTrustCache,
+  TrustedListSource,
+} from '../trust/trusted-list.js'
+import type {
+  ClientIdPrefix,
+  SessionAdapter,
+  TrustCacheAdapter,
+  VerifierConfig,
+  VerifierKeys,
+  WalletProfile,
+} from '../types.js'
 import { EudikitError } from '../types.js'
 import { toDerCertificates } from '../verify/certificates.js'
 import type { ResolvedTrust } from '../verify/engine.js'
 
+export type SigningAlgorithm = 'ES256' | 'ES384' | 'ES512'
+
+export interface ResolvedSigningKeys {
+  /** JAR signing key, resolved to a live key object; `null` when neither config nor env has one. */
+  signing: { key: KeyObject; alg: SigningAlgorithm } | null
+  /** x5c chain, leaf first. Empty when not configured. */
+  chainDer: Uint8Array[]
+  /** The same chain as standard base64 (the `x5c` header encoding). */
+  chainB64: string[]
+  /** dNSName SAN entries of the leaf — the valid `x509_san_dns` original client ids. */
+  sanDnsNames: string[]
+  /** base64url(SHA-256(leaf DER)) — the `x509_hash` original client id. `null` without a chain. */
+  x509HashClientId: string | null
+}
+
 export interface ResolvedVerifierConfig {
   profile: WalletProfile
   clientIdPrefix: ClientIdPrefix
+  /** Original client id for the `x509_*` prefixes; `null` when not configured. */
+  clientId: string | null
   /** Normalized (no trailing slash); `null` when neither config nor env provides one. */
   publicBaseUrl: string | null
   /** Normalized: leading slash, no trailing slash; `''` when mounted at the root. */
   routeBasePath: string
   session: SessionAdapter
+  keys: ResolvedSigningKeys
   expectedOrigins: string[]
   requestTtlSeconds: number
   resultTtlSeconds: number
   trust: ResolvedTrust
+  fetch: typeof fetch
   now: () => Date
 }
 
 const PUBLIC_BASE_URL_ENV = 'EUDIKIT_PUBLIC_BASE_URL'
+const SIGNING_KEY_ENV = 'EUDIKIT_SIGNING_KEY'
+
+/** Today's only live list; the default changes when a production list is published. */
+export const DEFAULT_AV_TRUSTED_LIST_URL =
+  'https://acceptance.trust.tech.ec.europa.eu/lists/age-verification/av-tl.xml'
 
 const TUNNEL_HINT =
   'cross-device flows need a publicly reachable HTTPS base URL — the DC API flow works on ' +
@@ -55,15 +97,20 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
     )
   }
 
+  const session = resolveSession(config.session)
+  const fetchImpl = resolveFetch(config.fetch)
+
   return {
     profile: validateProfile(config.profile, 'config.profile'),
     clientIdPrefix:
       config.clientIdPrefix === undefined
         ? 'redirect_uri'
         : validateClientIdPrefix(config.clientIdPrefix, 'config.clientIdPrefix'),
+    clientId: resolveClientId(config.clientId),
     publicBaseUrl: resolvePublicBaseUrl(config.publicBaseUrl),
     routeBasePath: resolveRouteBasePath(config.routeBasePath),
-    session: resolveSession(config.session),
+    session,
+    keys: resolveKeys(config.keys),
     expectedOrigins:
       config.expectedOrigins === undefined
         ? []
@@ -74,36 +121,236 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
       900
     ),
     resultTtlSeconds: validateTtlSeconds(config.resultTtlSeconds, 'config.resultTtlSeconds', 600),
-    trust: resolveTrust(config.trust),
+    trust: resolveTrust(config.trust, session, fetchImpl),
+    fetch: fetchImpl,
     now: config.now ?? (() => new Date()),
   }
 }
 
 /**
- * Trusted-list fetching is not built yet, and pretending otherwise would verify against nothing:
- * an explicitly enabled `avTrustedList` fails loud instead of being silently ignored. When the
- * option is omitted, verification uses `additionalTrustAnchors` only (DS-direct-match); the
- * trusted-list layer is the next phase, and the default flips to the EU AV list once it exists.
+ * The AV trusted list is ON by default: omitting `avTrustedList` (or passing `true`) verifies
+ * against the EU list at its default URL, `false` switches the layer off, and an object
+ * overrides URL, refresh cadence or cache. `additionalTrustAnchors` always apply on top —
+ * union, not either/or.
  */
-function resolveTrust(trust: VerifierConfig['trust']): ResolvedTrust {
-  if (trust === undefined) return { mode: 'strict', anchors: [] }
-  if (typeof trust !== 'object' || trust === null) {
+function resolveTrust(
+  trust: VerifierConfig['trust'],
+  session: SessionAdapter,
+  fetchImpl: typeof fetch
+): ResolvedTrust {
+  if (trust !== undefined && (typeof trust !== 'object' || trust === null)) {
     invalid('config.trust must be a TrustConfig object')
   }
 
-  const mode = trust.mode ?? 'strict'
+  const mode = trust?.mode ?? 'strict'
   if (mode !== 'strict' && mode !== 'permissive') {
     invalid(`config.trust.mode must be 'strict' or 'permissive', got ${JSON.stringify(mode)}`)
   }
 
-  if (trust.avTrustedList !== undefined && trust.avTrustedList !== false) {
-    notImplemented('AV trusted list fetching (trust.avTrustedList)')
-  }
-
-  const anchors = (trust.additionalTrustAnchors ?? []).flatMap((anchor, index) =>
+  const anchors = (trust?.additionalTrustAnchors ?? []).flatMap((anchor, index) =>
     toDerCertificates(anchor, `config.trust.additionalTrustAnchors[${index}]`)
   )
-  return { mode, anchors }
+
+  const listConfig = trust?.avTrustedList
+  if (listConfig === false) {
+    return { mode, anchors, trustedList: null }
+  }
+
+  let url = DEFAULT_AV_TRUSTED_LIST_URL
+  let refreshIntervalSeconds = 3600
+  if (listConfig !== undefined && listConfig !== true) {
+    if (typeof listConfig !== 'object' || listConfig === null) {
+      invalid('config.trust.avTrustedList must be a boolean or an options object')
+    }
+    if (listConfig.url !== undefined) {
+      if (typeof listConfig.url !== 'string' || parseUrl(listConfig.url) === null) {
+        invalid('config.trust.avTrustedList.url must be an absolute URL')
+      }
+      url = listConfig.url
+    }
+    refreshIntervalSeconds = validateTtlSeconds(
+      listConfig.refreshIntervalSeconds,
+      'config.trust.avTrustedList.refreshIntervalSeconds',
+      3600
+    )
+  }
+
+  return {
+    mode,
+    anchors,
+    trustedList: new TrustedListSource({
+      url,
+      refreshIntervalSeconds,
+      cache: resolveTrustCache(trust?.cache, session),
+      fetch: fetchImpl,
+    }),
+  }
+}
+
+function resolveTrustCache(
+  cache: 'memory' | 'session-adapter' | TrustCacheAdapter | undefined,
+  session: SessionAdapter
+): TrustCacheAdapter {
+  if (cache === undefined || cache === 'memory') return memoryTrustCache()
+  if (cache === 'session-adapter') return sessionAdapterTrustCache(session)
+  if (typeof cache === 'object' && cache !== null) {
+    if (typeof cache.get !== 'function' || typeof cache.set !== 'function') {
+      invalid('config.trust.cache adapter must provide get() and set()')
+    }
+    return cache
+  }
+  invalid(
+    `config.trust.cache must be 'memory', 'session-adapter' or a TrustCacheAdapter, got ` +
+      JSON.stringify(cache)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// signing keys
+// ---------------------------------------------------------------------------
+
+const CURVE_TO_ALGORITHM: Record<string, SigningAlgorithm> = {
+  prime256v1: 'ES256',
+  'P-256': 'ES256',
+  secp384r1: 'ES384',
+  'P-384': 'ES384',
+  secp521r1: 'ES512',
+  'P-521': 'ES512',
+}
+
+/**
+ * Resolves the JAR signing material once, at `createVerifier()` time, so that a malformed key
+ * or a key/certificate mismatch fails at boot instead of on the first signed request. All
+ * parsing is `node:crypto` — no certificate library, and the resolution is synchronous.
+ */
+function resolveKeys(keys: VerifierKeys | undefined): ResolvedSigningKeys {
+  if (keys !== undefined && (typeof keys !== 'object' || keys === null)) {
+    invalid('config.keys must be a VerifierKeys object')
+  }
+
+  const signing = resolveSigningKey(keys?.requestSigning)
+
+  const chainDer = (keys?.requestSigningCertificateChain ?? []).flatMap((certificate, index) =>
+    toDerCertificates(certificate, `config.keys.requestSigningCertificateChain[${index}]`)
+  )
+  let sanDnsNames: string[] = []
+  let x509HashClientId: string | null = null
+  const leafDer = chainDer[0]
+  if (leafDer !== undefined) {
+    let leaf: X509Certificate
+    try {
+      leaf = new X509Certificate(leafDer)
+    } catch (cause) {
+      invalidWithCause(
+        'config.keys.requestSigningCertificateChain[0] is not a parseable X.509 certificate',
+        cause
+      )
+    }
+    sanDnsNames = dnsNamesOf(leaf)
+    x509HashClientId = createHash('sha256').update(leafDer).digest('base64url')
+    if (signing !== null && !leaf.checkPrivateKey(signing.key)) {
+      invalid(
+        'keys.requestSigning does not match the public key of ' +
+          'keys.requestSigningCertificateChain[0] — the wallet would reject every signed request'
+      )
+    }
+  }
+
+  return {
+    signing,
+    chainDer,
+    chainB64: chainDer.map((der) => Buffer.from(der).toString('base64')),
+    sanDnsNames,
+    x509HashClientId,
+  }
+}
+
+function resolveSigningKey(
+  requestSigning: VerifierKeys['requestSigning']
+): ResolvedSigningKeys['signing'] {
+  let key: KeyObject
+  let declaredAlg: string | undefined
+
+  if (requestSigning === undefined) {
+    const pem = globalThis.process?.env?.[SIGNING_KEY_ENV]
+    if (typeof pem !== 'string' || pem === '') return null
+    try {
+      key = createPrivateKey(pem)
+    } catch (cause) {
+      invalidWithCause(`the ${SIGNING_KEY_ENV} env var is not a parseable PKCS#8 PEM key`, cause)
+    }
+  } else if ('jwk' in requestSigning) {
+    const jwk = requestSigning.jwk
+    if (typeof jwk !== 'object' || jwk === null) {
+      invalid('keys.requestSigning.jwk must be a private JWK object')
+    }
+    declaredAlg = typeof jwk.alg === 'string' ? jwk.alg : undefined
+    try {
+      key = createPrivateKey({ key: jwk as JsonWebKey, format: 'jwk' })
+    } catch (cause) {
+      invalidWithCause('keys.requestSigning.jwk is not a parseable private JWK', cause)
+    }
+  } else {
+    if (typeof requestSigning.pem !== 'string' || requestSigning.pem === '') {
+      invalid('keys.requestSigning.pem must be a PKCS#8 PEM string')
+    }
+    declaredAlg = requestSigning.alg
+    try {
+      key = createPrivateKey(requestSigning.pem)
+    } catch (cause) {
+      invalidWithCause('keys.requestSigning.pem is not a parseable PKCS#8 PEM key', cause)
+    }
+  }
+
+  if (key.asymmetricKeyType !== 'ec') {
+    invalid(
+      `the request signing key must be an EC P-256/P-384/P-521 key (ES256/ES384/ES512), got ` +
+        `key type "${key.asymmetricKeyType ?? 'unknown'}"`
+    )
+  }
+  const curve = key.asymmetricKeyDetails?.namedCurve ?? ''
+  const alg = CURVE_TO_ALGORITHM[curve]
+  if (alg === undefined) {
+    invalid(`the request signing key uses unsupported curve "${curve}"`)
+  }
+  if (declaredAlg !== undefined && declaredAlg !== alg) {
+    invalid(
+      `keys.requestSigning declares alg "${declaredAlg}" but the key's curve (${curve}) ` +
+        `requires ${alg}`
+    )
+  }
+  return { key, alg }
+}
+
+/** `X509Certificate.subjectAltName` renders as `DNS:a.example, IP Address:…, …`. */
+function dnsNamesOf(certificate: X509Certificate): string[] {
+  const san = certificate.subjectAltName
+  if (san === null || san === undefined) return []
+  return san
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith('DNS:'))
+    .map((entry) => entry.slice(4))
+}
+
+function resolveClientId(value: unknown): string | null {
+  if (value === undefined) return null
+  if (typeof value !== 'string' || value === '') {
+    invalid('config.clientId must be a non-empty string')
+  }
+  return value
+}
+
+function resolveFetch(value: unknown): typeof fetch {
+  if (value === undefined) return globalThis.fetch
+  if (typeof value !== 'function') {
+    invalid('config.fetch must be a fetch-compatible function')
+  }
+  return value as typeof fetch
+}
+
+function invalidWithCause(detail: string, cause: unknown): never {
+  throw new EudikitError('CONFIG_INVALID', detail, { cause })
 }
 
 export function validateProfile(value: unknown, source: string): WalletProfile {

@@ -178,18 +178,36 @@ describe('createVerifier — session adapter', () => {
 })
 
 describe('createVerifier — unimplemented surfaces stay loud', () => {
-  it('keeps the DC API verify entry point and handleRequestUri throwing through notImplemented', async () => {
+  it('rejects verify() calls outside the v1 protocol set with UNSUPPORTED_PROTOCOL', async () => {
     const verifier = createVerifier(config())
-    const surfaces: Array<[string, () => unknown]> = [
-      [
-        'verifier.verify()',
-        () => verifier.verify({ sessionId: 's', response: { protocol: 'p', data: null } }),
-      ],
-      ['verifier.handleRequestUri()', () => verifier.handleRequestUri({} as Request, 's')],
-    ]
-    for (const [surface, call] of surfaces) {
-      const error = await expectEudikitError(call, 'INTERNAL')
-      expect(error.message).toContain(surface)
+    for (const protocol of ['org-iso-mdoc', 'openid4vp-v1-multisigned', 'p']) {
+      const error = await expectEudikitError(
+        () => verifier.verify({ sessionId: 's', response: { protocol, data: null } }),
+        'UNSUPPORTED_PROTOCOL'
+      )
+      expect(error.message).toContain(protocol)
     }
+  })
+
+  it('throws SESSION_NOT_FOUND from verify() for an unknown session id', async () => {
+    const verifier = createVerifier(config())
+    await expectEudikitError(
+      () =>
+        verifier.verify({
+          sessionId: 'never-created',
+          response: { protocol: 'openid4vp-v1-unsigned', data: {} },
+        }),
+      'SESSION_NOT_FOUND'
+    )
+  })
+
+  it('answers handleRequestUri with an information-free 404 for an unknown session id', async () => {
+    const verifier = createVerifier(config())
+    const response = await verifier.handleRequestUri(
+      new Request('https://verifier.example/api/eudikit/wallet/request/unknown.jwt'),
+      'unknown'
+    )
+    expect(response.status).toBe(404)
+    expect(await response.text()).toBe('')
   })
 })

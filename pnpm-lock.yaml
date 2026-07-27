@@ -35,6 +35,9 @@ importers:
       '@sd-jwt/sd-jwt-vc':
         specifier: ~0.20.0
         version: 0.20.0
+      '@xmldom/xmldom':
+        specifier: ~0.9.10
+        version: 0.9.10
       dcql:
         specifier: ^3.0.0
         version: 3.0.0(typescript@7.0.2)
@@ -519,6 +522,10 @@ packages:
 
   '@vitest/utils@4.1.10':
     resolution: {integrity: sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA==}
+
+  '@xmldom/xmldom@0.9.10':
+    resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
+    engines: {node: '>=14.6'}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1188,6 +1195,8 @@ snapshots:
       '@vitest/pretty-format': 4.1.10
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
+
+  '@xmldom/xmldom@0.9.10': {}
 
   assertion-error@2.0.1: {}
 

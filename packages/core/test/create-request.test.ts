@@ -278,19 +278,23 @@ describe('requests.create — per-request option validation', () => {
   })
 })
 
-describe('requests.create — not-yet-implemented paths stay loud', () => {
-  it("defaults 'eudi' + qr/deep-link to signed JAR and throws notImplemented", async () => {
+describe('requests.create — signing × prefix × transport rules', () => {
+  it("rejects the 'eudi' qr/deep-link default (signed) under the redirect_uri prefix", async () => {
+    // profile 'eudi' defaults QR/deep-link to a signed request, and the default prefix
+    // cannot sign (OpenID4VP 1.0 §5.10) — the error must point at both ways out.
     const { verifier } = makeVerifier({ profile: 'eudi' })
     for (const channel of ['qr', 'deep-link'] as const) {
       const error = await expectEudikitError(
         () => verifier.requests.create({ preset: agePreset, channel }),
-        'INTERNAL'
+        'CONFIG_INVALID'
       )
-      expect(error.message).toContain('signed request objects (JAR)')
+      expect(error.message).toContain('redirect_uri')
+      expect(error.message).toContain('§5.10')
+      expect(error.message).toContain('signedRequest: false')
     }
   })
 
-  it('throws notImplemented for an explicit signedRequest: true on any channel', async () => {
+  it('rejects an explicit signedRequest: true with the redirect_uri prefix on any channel', async () => {
     const av = makeVerifier()
     const eudi = makeBareVerifier({ profile: 'eudi' })
     for (const [verifier, channel] of [
@@ -299,32 +303,43 @@ describe('requests.create — not-yet-implemented paths stay loud', () => {
     ] as const) {
       const error = await expectEudikitError(
         () => verifier.requests.create({ preset: agePreset, channel, signedRequest: true }),
-        'INTERNAL'
+        'CONFIG_INVALID'
       )
-      expect(error.message).toContain('signed request objects (JAR)')
+      expect(error.message).toContain('redirect_uri')
     }
   })
 
-  it("throws notImplemented for jarMode 'by-reference'", async () => {
+  it("rejects jarMode 'by-reference' on an unsigned request", async () => {
     const { verifier } = makeVerifier()
     const error = await expectEudikitError(
       () => verifier.requests.create({ preset: agePreset, channel: 'qr', jarMode: 'by-reference' }),
-      'INTERNAL'
+      'CONFIG_INVALID'
     )
-    expect(error.message).toContain('request_uri (JAR by reference)')
+    expect(error.message).toContain('signed Request Object')
   })
 
-  it("throws notImplemented for 'eudi' unsigned direct_post with default encryption", async () => {
+  it("builds 'eudi' unsigned direct_post with direct_post.jwt encryption by default", async () => {
     const { verifier } = makeVerifier({ profile: 'eudi' })
-    const error = await expectEudikitError(
-      () =>
-        verifier.requests.create({ preset: agePreset, channel: 'deep-link', signedRequest: false }),
-      'INTERNAL'
-    )
-    expect(error.message).toContain('direct_post.jwt')
+    const created = await verifier.requests.create({
+      preset: agePreset,
+      channel: 'deep-link',
+      signedRequest: false,
+    })
+    if (created.channel !== 'deep-link') throw new Error('expected deep-link')
+    const params = new URLSearchParams(created.deepLink.slice(created.deepLink.indexOf('?') + 1))
+    expect(params.get('response_mode')).toBe('direct_post.jwt')
+    const metadata = JSON.parse(params.get('client_metadata') ?? '{}') as {
+      jwks?: { keys?: Array<Record<string, unknown>> }
+      encrypted_response_enc_values_supported?: string[]
+    }
+    expect(metadata.encrypted_response_enc_values_supported).toEqual(['A128GCM'])
+    const key = metadata.jwks?.keys?.[0]
+    expect(key?.kty).toBe('EC')
+    // The published half is public: no private scalar anywhere in the emitted URI.
+    expect(created.deepLink).not.toContain('%22d%22')
   })
 
-  it('routes x509 client id prefixes to the signed-request path', async () => {
+  it('requires signing keys for the x509 client id prefixes', async () => {
     const { verifier } = makeVerifier()
     const error = await expectEudikitError(
       () =>
@@ -333,9 +348,9 @@ describe('requests.create — not-yet-implemented paths stay loud', () => {
           channel: 'deep-link',
           clientIdPrefix: 'x509_san_dns',
         }),
-      'INTERNAL'
+      'CONFIG_SIGNING_KEY_REQUIRED'
     )
-    expect(error.message).toContain('signed request objects (JAR)')
+    expect(error.message).toContain('keys.requestSigning')
   })
 
   it('rejects an x509 prefix combined with signedRequest: false as contradictory', async () => {
@@ -463,6 +478,7 @@ describe("requests.create — channel 'dc-api' (profile 'eudi', unsigned)", () =
       'dcql',
       'ephemeralPrivateJwk',
       'expectedOrigins',
+      'expiresAt',
       'nonce',
       'presetId',
       'profile',
@@ -572,9 +588,11 @@ describe("requests.create — channels 'qr' and 'deep-link' (profile 'av', by-va
     expect(ttlSeconds).toBe(900)
     expect(Object.keys(record).sort()).toEqual([
       'channel',
+      'clientId',
       'createdAt',
       'dcql',
       'expectedOrigins',
+      'expiresAt',
       'nonce',
       'presetId',
       'profile',
@@ -582,6 +600,7 @@ describe("requests.create — channels 'qr' and 'deep-link' (profile 'av', by-va
       'state',
       'v',
     ])
+    expect(record.clientId).toBe('redirect_uri:https://av-demo.example/api/eudikit/wallet/response')
     expect(record.v).toBe(1)
     expect(record.state).toBe(created.sessionId)
     expect(record.responseUri).toBe('https://av-demo.example/api/eudikit/wallet/response')

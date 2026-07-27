@@ -132,7 +132,10 @@ export interface VerifierConfig {
    */
   protocolAdapters?: readonly ProtocolAdapter[]
 
-  /** Test/platform injection. Defaults: `globalThis.fetch` and the real clock. */
+  /**
+   * Test/platform injection; `fetch` also serves the trusted-list refreshes. Defaults:
+   * `globalThis.fetch` and the real clock.
+   */
   fetch?: typeof fetch
   now?: () => Date
 }
@@ -251,7 +254,12 @@ export interface CreateRequestOptions<TClaims = Record<string, unknown>> {
   /** The SDK generates the nonce (≥16 bytes, base64url). Override only for tests. */
   nonce?: string
 
-  /** Derived from profile + channel by default. */
+  /**
+   * Derived from profile + channel by default: `'eudi'` QR/deep-link requests are signed,
+   * `dc-api` requests are not, and an `x509_*` clientIdPrefix forces `true` (those prefixes
+   * MUST sign — OpenID4VP 1.0 §5.10). Signed requests need `keys.requestSigning` plus, for
+   * the x509 prefixes, `keys.requestSigningCertificateChain`.
+   */
   signedRequest?: boolean
   /**
    * Response encryption: `dc-api` → `dc_api.jwt`; `qr`/`deep-link` with `'eudi'` → `direct_post.jwt`.
@@ -260,10 +268,11 @@ export interface CreateRequestOptions<TClaims = Record<string, unknown>> {
    */
   encryptResponse?: boolean
   /**
-   * QR/deep-link JAR transport. Only `'by-value'` is implemented today and it is the default
-   * for both channels; requesting `'by-reference'` throws. By-reference transport lands with
-   * signed-JAR support — `'eudi'` then defaults to it, as does the `'av'` QR flow (by-value
-   * inflates the QR with the whole DCQL).
+   * QR/deep-link JAR transport. `'by-reference'` serves a **signed** Request Object from
+   * `request_uri` — the `redirect_uri` prefix cannot sign (OpenID4VP 1.0 §5.10), so
+   * by-reference is only available, and is the default, for signed requests (it also keeps
+   * the QR payload small). Unsigned requests — the whole `'av'` profile — are carried by
+   * value.
    */
   jarMode?: 'by-value' | 'by-reference'
 

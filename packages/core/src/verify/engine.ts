@@ -11,6 +11,7 @@
  * in every mode.
  */
 
+import type { TrustedListSnapshot, TrustedListSource } from '../trust/trusted-list.js'
 import type {
   Check,
   DcqlQuery,
@@ -28,6 +29,8 @@ export interface ResolvedTrust {
   mode: 'strict' | 'permissive'
   /** DER trust anchors (from `trust.additionalTrustAnchors`). */
   anchors: Uint8Array[]
+  /** `null` when `avTrustedList: false` — trust then rests on `additionalTrustAnchors` alone. */
+  trustedList: TrustedListSource | null
 }
 
 export interface EngineInput {
@@ -49,6 +52,10 @@ export interface EngineInput {
 export async function runVerification(input: EngineInput): Promise<VerificationResult> {
   const collector = new CheckCollector()
   collector.checks.push(...input.baseChecks)
+
+  const trustedList =
+    input.trust.trustedList === null ? null : await input.trust.trustedList.getSnapshot(input.now)
+  addTrustedListChecks(collector, trustedList)
 
   const queriesById = new Map(input.dcql.credentials.map((query) => [query.id, query]))
   const presented: PresentedCredential[] = []
@@ -86,7 +93,7 @@ export async function runVerification(input: EngineInput): Promise<VerificationR
       queryId,
       presentation,
       sessionTranscript: input.sessionTranscript,
-      trust: { anchors: input.trust.anchors },
+      trust: { anchors: input.trust.anchors, trustedList },
       now: input.now,
     })
     collector.checks.push(...outcome.checks)
@@ -111,7 +118,7 @@ export async function runVerification(input: EngineInput): Promise<VerificationR
   let claims: unknown = null
   let error: EudikitError | null = verified
     ? null
-    : new EudikitError('VERIFICATION_FAILED', verdictMessage(enforcedFailures))
+    : verdictError(enforcedFailures, trustedList, input.trust.mode)
 
   if (verified && input.preset !== undefined) {
     try {
@@ -161,4 +168,62 @@ function verdictMessage(failures: Check[]): string {
   const shown = ids.slice(0, 4).join(', ')
   const suffix = ids.length > 4 ? ` and ${ids.length - 4} more` : ''
   return `verification failed: ${shown}${suffix} — see diagnostics for the full report`
+}
+
+/**
+ * A rejection caused purely by an unreachable trusted list gets its own error code — the
+ * operator's remedy (network/cache) is different from a wallet or credential problem. Any
+ * non-trust failure in the mix means the presentation itself has a problem, and the generic
+ * verdict wins.
+ */
+function verdictError(
+  failures: Check[],
+  trustedList: TrustedListSnapshot | null,
+  mode: 'strict' | 'permissive'
+): EudikitError {
+  const listUnavailable = trustedList !== null && !trustedList.available
+  if (
+    listUnavailable &&
+    mode === 'strict' &&
+    failures.every((check) => check.id.startsWith('trust.'))
+  ) {
+    return new EudikitError(
+      'TRUSTED_LIST_UNAVAILABLE',
+      'the AV trusted list could not be fetched and no cached copy exists, so strict mode ' +
+        'cannot decide issuer trust — see diagnostics (trust.list_fresh) for the fetch failure'
+    )
+  }
+  return new EudikitError('VERIFICATION_FAILED', verdictMessage(failures))
+}
+
+/**
+ * The per-result trusted-list rows. Freshness is loud in both directions: a stale or missing
+ * list is a failed `trust.list_fresh` (a trust-class check — strict rejects, permissive
+ * warns), never a silent fallback. The list's own XAdES signature is out of scope for this
+ * release, reported as skipped rather than omitted.
+ */
+function addTrustedListChecks(
+  collector: CheckCollector,
+  trustedList: TrustedListSnapshot | null
+): void {
+  if (trustedList === null) {
+    collector.add(
+      'trust.list_fresh',
+      'skipped',
+      'the AV trusted list layer is disabled (avTrustedList: false)'
+    )
+    collector.add('trust.list_signature_valid', 'skipped', 'no trusted list in use')
+    return
+  }
+  collector.add(
+    'trust.list_fresh',
+    trustedList.available && trustedList.fresh ? 'passed' : 'failed',
+    trustedList.detail
+  )
+  collector.add(
+    'trust.list_signature_valid',
+    'skipped',
+    'the trusted list XML signature (XAdES) is not verified in this release; transport ' +
+      'integrity rests on HTTPS'
+  )
 }

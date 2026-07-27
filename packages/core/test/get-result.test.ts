@@ -45,23 +45,38 @@ describe('getResult — lifecycle', () => {
 })
 
 describe('trust configuration', () => {
-  it('fails loud when the AV trusted list is explicitly enabled', () => {
-    for (const avTrustedList of [true, { url: 'https://example.org/tl.xml' }] as const) {
-      const error = (() => {
-        try {
-          makeVerifier({ trust: { avTrustedList } })
-        } catch (caught) {
-          return caught as Error
-        }
-        throw new Error('expected createVerifier to throw')
-      })()
-      expect(error.message).toContain('AV trusted list fetching')
+  it('accepts every avTrustedList spelling without touching the network at config time', () => {
+    const fetchSpy = vi.fn()
+    for (const avTrustedList of [
+      undefined,
+      true,
+      false,
+      { url: 'https://example.org/tl.xml' },
+      { refreshIntervalSeconds: 60 },
+    ] as const) {
+      expect(() =>
+        makeVerifier({
+          fetch: fetchSpy as unknown as typeof fetch,
+          trust: avTrustedList === undefined ? {} : { avTrustedList },
+        })
+      ).not.toThrow()
     }
+    // The list is fetched lazily at verification time, never while resolving config.
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('accepts avTrustedList: false and omitted alike', () => {
-    expect(() => makeVerifier({ trust: { avTrustedList: false } })).not.toThrow()
-    expect(() => makeVerifier({ trust: {} })).not.toThrow()
+  it('rejects malformed avTrustedList options', () => {
+    expect(() => makeVerifier({ trust: { avTrustedList: { url: 'not a url' } } })).toThrowError(
+      /absolute URL/
+    )
+    expect(() =>
+      makeVerifier({ trust: { avTrustedList: { refreshIntervalSeconds: -5 } } })
+    ).toThrowError(/positive integer/)
+    expect(() =>
+      makeVerifier({
+        trust: { cache: {} as unknown as import('../src/types.js').TrustCacheAdapter },
+      })
+    ).toThrowError(/get\(\) and set\(\)/)
   })
 
   it('rejects a malformed trust mode and malformed anchors', () => {

@@ -38,7 +38,8 @@ function makeVerifier(overrides: Partial<VerifierConfig> = {}): Verifier {
     profile: 'av',
     publicBaseUrl: PUBLIC_BASE,
     session: memorySessionAdapter(),
-    trust: { additionalTrustAnchors: [issuer.certificate] },
+    // Tests must never reach the live EU list; the trusted-list layer has its own suite.
+    trust: { additionalTrustAnchors: [issuer.certificate], avTrustedList: false },
     now: () => FIXED_NOW,
     ...overrides,
   })
@@ -174,7 +175,6 @@ describe('handleWalletResponse — happy path', () => {
       'mdoc.device_key_matches_mso',
       'mdoc.device_signature_valid',
       'trust.chain_valid',
-      'trust.issuer_in_trusted_list',
       'dcql.doctype_match',
       'dcql.claims_present',
       'dcql.claim_types_valid',
@@ -182,10 +182,14 @@ describe('handleWalletResponse — happy path', () => {
     ] as const) {
       expect(byId.get(id), `check ${id}`).toBe('passed')
     }
-    // Honestly reported gaps, not silent ones.
+    // Honestly reported gaps, not silent ones: with the trusted list disabled, every
+    // trust-list row says so instead of vanishing.
     expect(byId.get('mdoc.status_list_valid')).toBe('skipped')
     expect(byId.get('envelope.jwe_decrypted')).toBe('skipped')
     expect(byId.get('session.origin_allowed')).toBe('skipped')
+    expect(byId.get('trust.issuer_in_trusted_list')).toBe('skipped')
+    expect(byId.get('trust.list_fresh')).toBe('skipped')
+    expect(byId.get('trust.list_signature_valid')).toBe('skipped')
   })
 
   it('accepts the iOS vp_token[queryId] form-field spelling', async () => {
@@ -412,7 +416,7 @@ describe('handleWalletResponse — malformed responses and hygiene', () => {
       profile: 'av',
       publicBaseUrl: PUBLIC_BASE,
       session,
-      trust: { additionalTrustAnchors: [issuer.certificate] },
+      trust: { additionalTrustAnchors: [issuer.certificate], avTrustedList: false },
       now: () => FIXED_NOW,
     })
 

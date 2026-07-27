@@ -43,8 +43,11 @@ const EXACT: Record<string, CheckId> = {
   'The MSO signed date must be within the validity period of the certificate':
     'mdoc.validity_window',
   'The MSO must be valid at the time of verification': 'mdoc.validity_window',
+  // Chain determination against the anchor set (anchors ∪ trusted-list certificates) is
+  // `trust.chain_valid`; `trust.issuer_in_trusted_list` is reserved for the byte-equality
+  // membership decision made in verify-mdoc.
   'Unable to determine a trusted issuance chain for the provided trusted certificates and the signer of the issuer auth':
-    'trust.issuer_in_trusted_list',
+    'trust.chain_valid',
   'Issuer Auth must include a supported digestAlgorithm element': 'mdoc.value_digests_valid',
 }
 

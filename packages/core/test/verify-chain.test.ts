@@ -34,7 +34,7 @@ function makeVerifier(overrides: Partial<VerifierConfig> = {}): Verifier {
     profile: 'av',
     publicBaseUrl: PUBLIC_BASE,
     session: memorySessionAdapter(),
-    trust: { additionalTrustAnchors: [issuer.certificate] },
+    trust: { additionalTrustAnchors: [issuer.certificate], avTrustedList: false },
     now: () => FIXED_NOW,
     ...overrides,
   })
@@ -178,7 +178,8 @@ describe('verification chain — trust policy', () => {
     const result = await failedResult(verifier, created.sessionId)
     expect(result.policy).toBe('strict')
     expect(checkStatuses(result.diagnostics, 'trust.chain_valid')).toContain('failed')
-    expect(checkStatuses(result.diagnostics, 'trust.issuer_in_trusted_list')).toContain('failed')
+    // The trusted list is disabled in this suite, and the row says so instead of vanishing.
+    expect(checkStatuses(result.diagnostics, 'trust.issuer_in_trusted_list')).toContain('skipped')
     // The credential itself is internally sound; only trust failed.
     expect(checkStatuses(result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
     expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('passed')
@@ -186,7 +187,11 @@ describe('verification chain — trust policy', () => {
 
   it('permissive mode verifies but reports the trust failures and names the policy', async () => {
     const verifier = makeVerifier({
-      trust: { mode: 'permissive', additionalTrustAnchors: [issuer.certificate] },
+      trust: {
+        mode: 'permissive',
+        additionalTrustAnchors: [issuer.certificate],
+        avTrustedList: false,
+      },
     })
     const created = await respondWithRogueIssuer(verifier)
 
@@ -203,7 +208,11 @@ describe('verification chain — trust policy', () => {
 
   it('permissive mode still rejects a broken device signature — only trust relaxes', async () => {
     const verifier = makeVerifier({
-      trust: { mode: 'permissive', additionalTrustAnchors: [issuer.certificate] },
+      trust: {
+        mode: 'permissive',
+        additionalTrustAnchors: [issuer.certificate],
+        avTrustedList: false,
+      },
     })
     const created = await verifier.requests.create({ preset: presets.age(), channel: 'deep-link' })
     const params = deepLinkParams(created)

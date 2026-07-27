@@ -9,13 +9,14 @@
  * consistency, device-key authorization, and the issuer-algorithm allowlist.
  *
  * Revocation is deliberately not fetched here: `mdoc.status_list_valid` reports `skipped`.
- * Status-list checking requires outbound fetches and a caching policy, both of which arrive
- * with the trusted-list layer; today's AV attestations are short-lived and the EU list carries
- * no revocation entries for them.
+ * Today's AV attestations are short-lived and carry no status entry, so there is nothing to
+ * fetch; status-list checking arrives when a credential population that uses it does.
  */
 
 import { DeviceResponse, type Document, Verifier } from '@owf/mdoc'
+import type { TrustedListSnapshot } from '../trust/trusted-list.js'
 import type { Check, VerifiedCredential } from '../types.js'
+import { certificateBytesEqual } from './certificates.js'
 import { CheckCollector, mapAssessment } from './checks.js'
 import { jsonSafeClaims } from './json-safe.js'
 import { createMdocContext } from './mdoc-context.js'
@@ -25,6 +26,8 @@ const ALLOWED_ISSUER_ALGORITHMS = new Set([-7, -35, -36])
 export interface MdocTrustOptions {
   /** DER trust anchors for DS-direct-match. */
   anchors: Uint8Array[]
+  /** The AV trusted list snapshot for this verification; `null` when the layer is disabled. */
+  trustedList: TrustedListSnapshot | null
 }
 
 export interface VerifyMdocInput {
@@ -100,12 +103,20 @@ export async function verifyMdocPresentation(input: VerifyMdocInput): Promise<Ve
     return { credential: null, checks: collector.checks }
   }
 
+  // The chain check runs against the union of the configured anchors and every trusted-list
+  // certificate: a DS on the list and a DS chained to a bring-your-own anchor are both
+  // acceptable issuers (list membership itself is judged separately below).
+  const trustedCertificates = [
+    ...input.trust.anchors,
+    ...(input.trust.trustedList?.services.flatMap((service) => service.certificates) ?? []),
+  ]
+
   try {
     await Verifier.verifyDeviceResponse(
       {
         deviceResponse,
         sessionTranscript: input.sessionTranscript,
-        trustedCertificates: [{ issuance: input.trust.anchors }],
+        trustedCertificates: [{ issuance: trustedCertificates }],
         now: input.now,
         disableStatusValidation: true,
         onCheck: (assessment) => {
@@ -120,11 +131,21 @@ export async function verifyMdocPresentation(input: VerifyMdocInput): Promise<Ve
     collector.add('mdoc.decoded', 'failed', `verification aborted: ${briefly(cause)}`, queryId)
   }
 
+  const trustedListEntry = evaluateTrustedListMembership(
+    input.trust,
+    document.issuerSigned.issuerAuth.certificate,
+    collector,
+    queryId
+  )
+  if (credential !== null && trustedListEntry !== null) {
+    credential.issuer.trustedListEntry = trustedListEntry
+  }
+
   collector.add(
     'mdoc.status_list_valid',
     'skipped',
-    'revocation is not checked in this release: status-list fetching lands with the ' +
-      'trusted-list layer, and AV attestations carry no status entry',
+    'revocation is not checked in this release: AV attestations are short-lived and carry ' +
+      'no status entry',
     queryId
   )
 
@@ -251,7 +272,7 @@ function extractCredential(
     claims: jsonSafeClaims(claims),
     issuer: {
       subject: issuerSubject,
-      // Populated when the trusted-list layer lands; DS-direct-match has no TSP metadata.
+      // Filled in after the trusted-list membership evaluation runs.
       trustedListEntry: null,
     },
     validity: {
@@ -260,6 +281,86 @@ function extractCredential(
       signedAt: validity.signed,
     },
   }
+}
+
+/**
+ * DS-direct-match against the AV trusted list: the presented signer certificate must be
+ * byte-equal to a `ServiceDigitalIdentity` certificate (every identity on the list IS a DS
+ * certificate — there is no chain to build). Status semantics: only `recognized` passes;
+ * `deprecated` (and any future status) fails, strictly in strict mode and as a warning in
+ * permissive mode. A DS that is absent from the list but accepted through
+ * `additionalTrustAnchors` reports `skipped` — membership was evaluated and is honestly "no",
+ * but the union contract says configured anchors may vouch instead (`trust.chain_valid`).
+ */
+function evaluateTrustedListMembership(
+  trust: MdocTrustOptions,
+  signerCertificate: Uint8Array | undefined,
+  collector: CheckCollector,
+  queryId: string
+): VerifiedCredential['issuer']['trustedListEntry'] {
+  if (trust.trustedList === null) {
+    collector.add(
+      'trust.issuer_in_trusted_list',
+      'skipped',
+      'the AV trusted list layer is disabled; issuer trust rests on additionalTrustAnchors ' +
+        '(trust.chain_valid)',
+      queryId
+    )
+    return null
+  }
+  if (!trust.trustedList.available) {
+    collector.add(
+      'trust.issuer_in_trusted_list',
+      'skipped',
+      'membership could not be evaluated: the trusted list is unavailable (trust.list_fresh)',
+      queryId
+    )
+    return null
+  }
+  if (signerCertificate === undefined) {
+    collector.add(
+      'trust.issuer_in_trusted_list',
+      'failed',
+      'the presentation carries no document signer certificate to match against the list',
+      queryId
+    )
+    return null
+  }
+
+  for (const service of trust.trustedList.services) {
+    for (const certificate of service.certificates) {
+      if (!certificateBytesEqual(certificate, signerCertificate)) continue
+      const recognized = service.status === 'recognized'
+      collector.add(
+        'trust.issuer_in_trusted_list',
+        recognized ? 'passed' : 'failed',
+        recognized
+          ? `DS certificate matches "${service.serviceName}" (${service.tspName})`
+          : `DS certificate matches "${service.serviceName}" (${service.tspName}) but the ` +
+              `service status is "${service.status}" — only recognized services are trusted`,
+        queryId
+      )
+      return {
+        tspName: service.tspName,
+        serviceName: service.serviceName,
+        status: service.status,
+      }
+    }
+  }
+
+  const anchorsVouch =
+    trust.anchors.length > 0 &&
+    !collector.checks.some((check) => check.id === 'trust.chain_valid' && check.status === 'failed')
+  collector.add(
+    'trust.issuer_in_trusted_list',
+    anchorsVouch ? 'skipped' : 'failed',
+    anchorsVouch
+      ? 'not on the AV trusted list; the issuer is accepted through additionalTrustAnchors ' +
+          '(trust.chain_valid)'
+      : 'the document signer certificate matches no ServiceDigitalIdentity on the AV trusted list',
+    queryId
+  )
+  return null
 }
 
 function flattenDn(subject: string): string {

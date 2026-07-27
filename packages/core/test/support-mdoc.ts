@@ -43,7 +43,11 @@ export interface TestKeyPair {
 }
 
 export function p256KeyPair(): TestKeyPair {
-  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
+  return ecKeyPair('P-256')
+}
+
+export function ecKeyPair(namedCurve: 'P-256' | 'P-384' | 'P-521'): TestKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve })
   return {
     privateKey,
     publicKey,
@@ -129,13 +133,20 @@ export interface CertificateOptions {
   serial?: number
   notBefore?: Date
   notAfter?: Date
+  /** dNSName subjectAltName entries; their presence upgrades the certificate to v3. */
+  san?: string[]
 }
 
-/** DER-encoded self-signed X.509 v1 certificate over the pair's public key. */
+const OID_SUBJECT_ALT_NAME = derOid([0x55, 0x1d, 0x11])
+
+/**
+ * DER-encoded self-signed X.509 certificate over the pair's public key — v1, or v3 with a
+ * subjectAltName extension when `san` is given (the shape the `x509_san_dns` prefix needs).
+ */
 export function selfSignedCertificate(keys: TestKeyPair, options: CertificateOptions): Uint8Array {
   const subject = name(options.commonName, options.country ?? 'UT')
   const spki = new Uint8Array(keys.publicKey.export({ type: 'spki', format: 'der' }))
-  const tbs = derSeq(
+  const core = [
     derInteger(options.serial ?? 1),
     derSeq(OID_ECDSA_WITH_SHA256),
     subject,
@@ -144,8 +155,29 @@ export function selfSignedCertificate(keys: TestKeyPair, options: CertificateOpt
       derUtcTime(options.notAfter ?? new Date(FIXED_NOW.getTime() + 180 * 86_400_000))
     ),
     subject,
-    spki
-  )
+    spki,
+  ]
+  const tbs =
+    options.san === undefined || options.san.length === 0
+      ? derSeq(...core)
+      : derSeq(
+          // version [0] EXPLICIT v3(2)
+          der(0xa0, derInteger(2)),
+          ...core,
+          // extensions [3] EXPLICIT: one subjectAltName with dNSName ([2] IA5String) entries
+          der(
+            0xa3,
+            derSeq(
+              derSeq(
+                OID_SUBJECT_ALT_NAME,
+                der(
+                  0x04,
+                  derSeq(...options.san.map((dns) => der(0x82, new TextEncoder().encode(dns))))
+                )
+              )
+            )
+          )
+        )
   const signature = new Uint8Array(createSign('SHA256').update(tbs).sign(keys.privateKey))
   return derSeq(tbs, derSeq(OID_ECDSA_WITH_SHA256), der(0x03, concat(Uint8Array.of(0), signature)))
 }

@@ -1,30 +1,41 @@
 /**
  * `verifier.requests.create()` — the request-production pipeline.
  *
- * Two shapes come out of here in this release, one per channel family:
+ * Shapes that come out of here, per channel family:
  *
  *  - `'dc-api'` → an `openid4vp-v1-unsigned` request object for
- *    `navigator.credentials.get()`. Unsigned requests carry no `client_id` (OpenID4VP 1.0
- *    Appendix A: it MUST be omitted — the wallet derives the audience from the calling origin)
- *    and no `state` — the caller carries the session id in its own context.
- *  - `'qr' | 'deep-link'` → a by-value `{scheme}://authorize?…` URI with
- *    `response_mode=direct_post`, where `state` carries the session id and comes back in the
- *    wallet's form POST.
+ *    `navigator.credentials.get()` — or `openid4vp-v1-signed` (`data.request` = JWS compact,
+ *    with the mandatory `expected_origins` claim) when `signedRequest` is on. Unsigned
+ *    requests carry no `client_id` (OpenID4VP 1.0 Appendix A: it MUST be omitted — the wallet
+ *    derives the audience from the calling origin) and no `state` — the caller carries the
+ *    session id in its own context.
+ *  - `'qr' | 'deep-link'` unsigned → a by-value `{scheme}://authorize?…` URI with
+ *    `response_mode=direct_post[.jwt]`, where `state` carries the session id and comes back
+ *    in the wallet's POST.
+ *  - `'qr' | 'deep-link'` signed → by default a short by-reference URI,
+ *    `{scheme}://authorize?client_id=…&request_uri=…`, whose Request Object is served once by
+ *    `handleRequestUri`; `jarMode: 'by-value'` inlines the JWS into a `request` parameter
+ *    instead.
+ *
+ * Signing and transport are coupled by the spec, not by choice: the `redirect_uri` prefix
+ * cannot sign (OpenID4VP 1.0 §5.10 — the wallet has no trusted key for it), so by-reference
+ * transport — which serves a signed Request Object — is available to signed flows only. The
+ * `'av'` profile therefore stays unsigned by-value end to end, and `'eudi'` QR/deep-link
+ * defaults to signed by-reference.
  *
  * Every request gets fresh entropy: nonce and session id are independent 32-byte random values,
  * and encrypted flows additionally get a per-request P-256 key pair whose private half is stored
- * only in the session record — no output of this module ever contains it.
- *
- * Signed request objects (JAR), `request_uri` transport and encrypted `direct_post.jwt`
- * responses are not built yet; every path that would need them throws `notImplemented` instead
- * of silently downgrading to an unsigned or unencrypted request.
+ * only in the session record — no output of this module ever contains it. Encrypted direct_post
+ * flows also write a `jwekid:` index record, because a `direct_post.jwt` form carries no
+ * `state` field in the clear: the response endpoint finds the session by the JWE header's
+ * `kid`, which names the ephemeral key — and therefore the session — it was encrypted to.
  */
 
 import { createHash, randomBytes } from 'node:crypto'
 import { buildDcqlQuery } from '../dcql/build.js'
-import { notImplemented } from '../internal/not-implemented.js'
 import type {
   Channel,
+  ClientIdPrefix,
   CreatedRequest,
   CreateRequestOptions,
   DcqlQuery,
@@ -33,6 +44,7 @@ import type {
   WalletProfile,
 } from '../types.js'
 import { EudikitError } from '../types.js'
+import { SUPPORTED_RESPONSE_ENCRYPTION } from '../verify/envelope.js'
 import {
   type ResolvedVerifierConfig,
   requirePublicBaseUrl,
@@ -42,12 +54,18 @@ import {
   validateTtlSeconds,
 } from './config.js'
 import { generateEphemeralEncryptionKey } from './ephemeral-key.js'
+import {
+  resolveSignedRequestMaterial,
+  type SignedRequestMaterial,
+  signRequestObject,
+} from './jar.js'
 
 const NONCE_BYTES = 32
 const SESSION_ID_BYTES = 32
 const DEFAULT_SCHEME = 'eudi-openid4vp'
 const DEEP_LINK_AUTHORITY = 'authorize'
 const SESSION_KEY_PREFIX = 'request:'
+const JWE_KID_KEY_PREFIX = 'jwekid:'
 
 /** RFC 3986 §3.1 scheme syntax. */
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/
@@ -55,9 +73,10 @@ const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/
 /**
  * Versioned shape of a pending-request record. Internal — not a public contract. `state` and
  * `responseUri` exist only for the direct_post channels, `ephemeralPrivateJwk` only for
- * encrypted flows, `presetId` only for preset-built requests and `successRedirectTemplate`
- * only for the redirect return mode; a field that means nothing in a given flow is absent,
- * not null.
+ * encrypted flows, `presetId` only for preset-built requests, `successRedirectTemplate` only
+ * for the redirect return mode, `clientId` only where a transcript rebuild needs it
+ * (direct_post), and `jar`/`jarServed` only for by-reference transport; a field that means
+ * nothing in a given flow is absent, not null.
  */
 export interface PendingRequestRecord extends Record<string, unknown> {
   v: 1
@@ -67,9 +86,13 @@ export interface PendingRequestRecord extends Record<string, unknown> {
   dcql: DcqlQuery
   expectedOrigins: string[]
   createdAt: string
+  expiresAt: string
   state?: string
   responseUri?: string
+  clientId?: string
   ephemeralPrivateJwk?: Jwk
+  jar?: string
+  jarServed?: boolean
   presetId?: string
   successRedirectTemplate?: string
 }
@@ -85,7 +108,13 @@ export function parsePendingRequestRecord(
   return record as PendingRequestRecord
 }
 
-export { SESSION_KEY_PREFIX as REQUEST_KEY_PREFIX }
+export { JWE_KID_KEY_PREFIX, SESSION_KEY_PREFIX as REQUEST_KEY_PREFIX }
+
+/** Versioned `jwekid:` index record — resolves a JWE `kid` to its session id. */
+export interface JweKidIndexRecord extends Record<string, unknown> {
+  v: 1
+  sessionId: string
+}
 
 interface RequestContext {
   config: ResolvedVerifierConfig
@@ -147,27 +176,51 @@ export async function createRequest(
     options.clientIdPrefix === undefined
       ? config.clientIdPrefix
       : validateClientIdPrefix(options.clientIdPrefix, 'options.clientIdPrefix')
+  const signedRequest = resolveSignedRequestFlag(options, profile, channel, clientIdPrefix)
+  const material = signedRequest ? resolveSignedRequestMaterial(config, clientIdPrefix) : null
+
+  const context: RequestContext = buildContext(config, options, dcql, profile)
+
+  if (channel === 'dc-api') {
+    return createDcApiRequest(context, options, material)
+  }
+  return createDirectPostRequest(context, options, channel, material)
+}
+
+/**
+ * Signing and the client id prefix are one decision, not two: the `x509_*` prefixes MUST sign
+ * and `redirect_uri` MUST NOT (OpenID4VP 1.0 §5.10). Defaults when nothing is forced:
+ * `dc-api` unsigned, QR/deep-link signed exactly for the `'eudi'` profile.
+ */
+function resolveSignedRequestFlag(
+  options: CreateRequestOptions<unknown>,
+  profile: WalletProfile,
+  channel: Channel,
+  clientIdPrefix: ClientIdPrefix
+): boolean {
+  const explicit = optionalBoolean(options.signedRequest, 'options.signedRequest')
+
   if (clientIdPrefix !== 'redirect_uri') {
-    if (options.signedRequest === false) {
+    if (explicit === false) {
       invalid(
         `clientIdPrefix '${clientIdPrefix}' requires a signed request object ` +
           '(OpenID4VP 1.0 §5.10), so signedRequest cannot be false'
       )
     }
-    notImplemented('signed request objects (JAR)')
+    return true
   }
 
-  const signedRequest =
-    optionalBoolean(options.signedRequest, 'options.signedRequest') ??
-    (channel === 'dc-api' ? false : profile === 'eudi')
-  if (signedRequest) notImplemented('signed request objects (JAR)')
-
-  const context: RequestContext = buildContext(config, options, dcql, profile)
-
-  if (channel === 'dc-api') {
-    return createDcApiRequest(context, options)
+  const signed = explicit ?? (channel === 'dc-api' ? false : profile === 'eudi')
+  if (signed) {
+    invalid(
+      "a signed request object cannot use the 'redirect_uri' client id prefix — the wallet " +
+        'has no way to obtain a trusted key for it (OpenID4VP 1.0 §5.10). Configure ' +
+        "clientIdPrefix 'x509_san_dns' or 'x509_hash' together with keys.requestSigning and " +
+        'keys.requestSigningCertificateChain, or pass signedRequest: false for an unsigned ' +
+        'by-value request'
+    )
   }
-  return createDirectPostRequest(context, options, channel)
+  return false
 }
 
 function buildContext(
@@ -206,13 +259,14 @@ function buildContext(
 
 async function createDcApiRequest(
   context: RequestContext,
-  options: CreateRequestOptions<unknown>
+  options: CreateRequestOptions<unknown>,
+  material: SignedRequestMaterial | null
 ): Promise<CreatedRequest> {
   // The profile × channel matrix defaults 'eudi' + 'dc-api' to the encrypted dc_api.jwt mode.
   const encryptResponse =
     optionalBoolean(options.encryptResponse, 'options.encryptResponse') ?? true
 
-  const data: Record<string, unknown> = {
+  const parameters: Record<string, unknown> = {
     response_type: 'vp_token',
     response_mode: encryptResponse ? 'dc_api.jwt' : 'dc_api',
     nonce: context.nonce,
@@ -223,10 +277,35 @@ async function createDcApiRequest(
   if (encryptResponse) {
     const key = await generateEphemeralEncryptionKey()
     ephemeralPrivateJwk = key.privateJwk
-    data.client_metadata = {
+    parameters.client_metadata = {
       jwks: { keys: [key.publicJwk] },
-      encrypted_response_enc_values_supported: ['A128GCM'],
+      encrypted_response_enc_values_supported: SUPPORTED_RESPONSE_ENCRYPTION,
     }
+  }
+
+  let dcApiRequest: Extract<CreatedRequest, { channel: 'dc-api' }>['dcApiRequest']
+  if (material === null) {
+    // Unsigned requests MUST omit client_id — the wallet takes its audience from the origin.
+    dcApiRequest = { protocol: 'openid4vp-v1-unsigned', data: parameters }
+  } else {
+    if (context.expectedOrigins.length === 0) {
+      invalid(
+        'signed DC API requests must pin the origins they may be delivered to via the ' +
+          'expected_origins claim (OpenID4VP 1.0 Appendix A.3.2) — set expectedOrigins in the ' +
+          'verifier config or per request'
+      )
+    }
+    const jws = await signRequestObject({
+      material,
+      claims: {
+        ...parameters,
+        client_id: material.clientId,
+        expected_origins: context.expectedOrigins,
+      },
+      issuedAt: context.createdAt,
+      expiresAt: context.expiresAt,
+    })
+    dcApiRequest = { protocol: 'openid4vp-v1-signed', data: { request: jws } }
   }
 
   await storeRecord(context, 'dc-api', {
@@ -236,7 +315,7 @@ async function createDcApiRequest(
   return {
     channel: 'dc-api',
     sessionId: context.sessionId,
-    dcApiRequest: { protocol: 'openid4vp-v1-unsigned', data },
+    dcApiRequest,
     expiresAt: context.expiresAt,
   }
 }
@@ -248,7 +327,8 @@ async function createDcApiRequest(
 async function createDirectPostRequest(
   context: RequestContext,
   options: CreateRequestOptions<unknown>,
-  channel: 'qr' | 'deep-link'
+  channel: 'qr' | 'deep-link',
+  material: SignedRequestMaterial | null
 ): Promise<CreatedRequest> {
   if (context.profile === 'av' && options.encryptResponse === true) {
     invalid(
@@ -259,40 +339,100 @@ async function createDirectPostRequest(
   const encryptResponse =
     optionalBoolean(options.encryptResponse, 'options.encryptResponse') ??
     context.profile === 'eudi'
-  if (encryptResponse) notImplemented('encrypted direct_post responses (direct_post.jwt)')
 
-  const jarMode = resolveJarMode(options.jarMode)
-  if (jarMode === 'by-reference') notImplemented('request_uri (JAR by reference)')
-
+  const jarMode = resolveJarMode(options.jarMode, material)
   const scheme = resolveScheme(options.scheme)
   const successRedirectTemplate = resolveSuccessRedirectTemplate(options.successRedirectTemplate)
   const base = requirePublicBaseUrl(context.config, channel)
   const responseUri = `${base}${context.config.routeBasePath}/wallet/response`
+  const clientId = material === null ? `redirect_uri:${responseUri}` : material.clientId
+  const responseMode = encryptResponse ? 'direct_post.jwt' : 'direct_post'
 
-  const params = new URLSearchParams()
-  params.set('client_id', `redirect_uri:${responseUri}`)
-  params.set('response_type', 'vp_token')
-  params.set('response_mode', 'direct_post')
-  params.set('nonce', context.nonce)
-  params.set('state', context.sessionId)
-  params.set('response_uri', responseUri)
-  params.set('dcql_query', JSON.stringify(context.dcql))
+  let ephemeralPrivateJwk: Jwk | undefined
+  let clientMetadata: Record<string, unknown> | undefined
+  if (encryptResponse) {
+    const key = await generateEphemeralEncryptionKey()
+    ephemeralPrivateJwk = key.privateJwk
+    clientMetadata = {
+      jwks: { keys: [key.publicJwk] },
+      encrypted_response_enc_values_supported: SUPPORTED_RESPONSE_ENCRYPTION,
+    }
+  }
+
   // The URI needs an authority: the AV wallet registers its deep-link intent filter with host
   // `authorize`, and a URI with an empty authority never matches on Android, while iOS ignores
   // the host.
-  const uri = `${scheme}://${DEEP_LINK_AUTHORITY}?${params.toString()}`
+  let uri: string
+  let requestUri: string | undefined
+  let jar: string | undefined
+  if (material !== null) {
+    const signed = await signRequestObject({
+      material,
+      claims: {
+        client_id: clientId,
+        response_type: 'vp_token',
+        response_mode: responseMode,
+        response_uri: responseUri,
+        nonce: context.nonce,
+        state: context.sessionId,
+        dcql_query: context.dcql,
+        ...(clientMetadata !== undefined ? { client_metadata: clientMetadata } : {}),
+      },
+      issuedAt: context.createdAt,
+      expiresAt: context.expiresAt,
+    })
+
+    const params = new URLSearchParams()
+    params.set('client_id', clientId)
+    if (jarMode === 'by-reference') {
+      jar = signed
+      requestUri = `${base}${context.config.routeBasePath}/wallet/request/${context.sessionId}.jwt`
+      params.set('request_uri', requestUri)
+    } else {
+      params.set('request', signed)
+    }
+    uri = `${scheme}://${DEEP_LINK_AUTHORITY}?${params.toString()}`
+  } else {
+    const params = new URLSearchParams()
+    params.set('client_id', clientId)
+    params.set('response_type', 'vp_token')
+    params.set('response_mode', responseMode)
+    params.set('nonce', context.nonce)
+    params.set('state', context.sessionId)
+    params.set('response_uri', responseUri)
+    params.set('dcql_query', JSON.stringify(context.dcql))
+    if (clientMetadata !== undefined) {
+      params.set('client_metadata', JSON.stringify(clientMetadata))
+    }
+    uri = `${scheme}://${DEEP_LINK_AUTHORITY}?${params.toString()}`
+  }
 
   await storeRecord(context, channel, {
     state: context.sessionId,
     responseUri,
+    clientId,
+    ...(ephemeralPrivateJwk !== undefined ? { ephemeralPrivateJwk } : {}),
+    ...(jar !== undefined ? { jar } : {}),
     ...(successRedirectTemplate !== undefined ? { successRedirectTemplate } : {}),
   })
+
+  // direct_post.jwt arrives as a lone `response` JWE with no clear-text state, so the response
+  // endpoint resolves the session through the key id the response was encrypted to.
+  if (ephemeralPrivateJwk !== undefined && typeof ephemeralPrivateJwk.kid === 'string') {
+    const index: JweKidIndexRecord = { v: 1, sessionId: context.sessionId }
+    await context.config.session.set(
+      `${JWE_KID_KEY_PREFIX}${ephemeralPrivateJwk.kid}`,
+      index,
+      context.ttlSeconds
+    )
+  }
 
   if (channel === 'qr') {
     return {
       channel: 'qr',
       sessionId: context.sessionId,
       qrPayload: uri,
+      ...(requestUri !== undefined ? { requestUri } : {}),
       expiresAt: context.expiresAt,
     }
   }
@@ -300,6 +440,7 @@ async function createDirectPostRequest(
     channel: 'deep-link',
     sessionId: context.sessionId,
     deepLink: uri,
+    ...(requestUri !== undefined ? { requestUri } : {}),
     expiresAt: context.expiresAt,
   }
 }
@@ -321,6 +462,7 @@ async function storeRecord(
     dcql: context.dcql,
     expectedOrigins: context.expectedOrigins,
     createdAt: context.createdAt.toISOString(),
+    expiresAt: context.expiresAt.toISOString(),
     ...(context.presetId !== undefined ? { presetId: context.presetId } : {}),
     ...extra,
   }
@@ -405,10 +547,27 @@ function validateChannel(value: unknown): Channel {
   invalid(`options.channel must be 'dc-api', 'qr' or 'deep-link', got ${JSON.stringify(value)}`)
 }
 
-function resolveJarMode(value: unknown): 'by-value' | 'by-reference' {
-  if (value === undefined) return 'by-value'
-  if (value === 'by-value' || value === 'by-reference') return value
-  invalid(`options.jarMode must be 'by-value' or 'by-reference', got ${JSON.stringify(value)}`)
+/**
+ * `request_uri` transport serves a *signed* Request Object, so by-reference is only reachable
+ * from signed flows; it is also their default, because it keeps the QR/deep-link URI short.
+ * Unsigned requests (the whole `'av'` profile) stay by value.
+ */
+function resolveJarMode(
+  value: unknown,
+  material: SignedRequestMaterial | null
+): 'by-value' | 'by-reference' {
+  if (value !== undefined && value !== 'by-value' && value !== 'by-reference') {
+    invalid(`options.jarMode must be 'by-value' or 'by-reference', got ${JSON.stringify(value)}`)
+  }
+  const mode = value ?? (material === null ? 'by-value' : 'by-reference')
+  if (mode === 'by-reference' && material === null) {
+    invalid(
+      "jarMode 'by-reference' serves a signed Request Object from request_uri, so it needs " +
+        'a signed request: set signedRequest: true (with an x509_* prefix and signing keys) ' +
+        "or use jarMode 'by-value'"
+    )
+  }
+  return mode
 }
 
 function resolveScheme(value: unknown): string {
