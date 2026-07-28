@@ -11,9 +11,12 @@ point is that the verification runs where your code runs.
 
 ## Status: pre-release — NOT production ready
 
-The mdoc path works end to end, against the OpenID4VP 1.0 test vectors and a real EU trusted
-list, but nothing here has met a wallet on a physical device yet and nothing is published to
-npm. Do not use it to make a real access-control decision.
+The mdoc path works end to end — against the OpenID4VP 1.0 test vectors, a real EU trusted
+list, and **a real wallet on a real phone**: the EU Age Verification wallet presented a
+Proof-of-Age attestation over a deep link and this SDK verified it, device signature and
+trusted-list membership included. Nothing is published to npm yet, and the eudi profile
+(December 2026 wallets) has not met a live counterparty. Do not use it to make a real
+access-control decision.
 
 | Package | State |
 |---|---|

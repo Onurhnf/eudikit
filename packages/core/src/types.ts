@@ -119,8 +119,9 @@ export interface VerifierConfig {
    * Client Identifier Prefix (OpenID4VP 1.0 §5.10). The default follows the profile:
    * `'av'` → `redirect_uri` (unsigned requests), `'eudi'` → `x509_hash` — HAIP mandates
    * x509-authenticated requests in the EUDI ecosystem, where `redirect_uri` is forbidden.
-   * An explicit value always wins, `redirect_uri` under `'eudi'` included: the SDK builds
-   * such requests (useful against test wallets), but EUDI wallets will reject them.
+   * An explicit value always wins, `redirect_uri` under `'eudi'` included — together with
+   * `signedRequest: false`, since a signed request cannot use `redirect_uri` (OpenID4VP 1.0
+   * §5.10). Useful against test wallets; EUDI wallets will reject the combination.
    * Per-request override: `requests.create({ clientIdPrefix })`.
    */
   clientIdPrefix?: ClientIdPrefix
