@@ -1,21 +1,52 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { age } from '../src/presets/age.js'
+import type { CredentialFormat } from '../src/types.js'
 import { EudikitError } from '../src/types.js'
 import { crossValidate, verifiedCredential } from './support.js'
 
-function expectError(code: string, fn: () => unknown): void {
+function expectError(code: string, fn: () => unknown): EudikitError {
   try {
     fn()
-    expect.unreachable(`expected a ${code} EudikitError`)
   } catch (error) {
     expect(error).toBeInstanceOf(EudikitError)
     expect((error as EudikitError).code).toBe(code)
+    return error as EudikitError
   }
+  expect.unreachable(`expected a ${code} EudikitError`)
 }
 
+const GERMAN_PIDS: Array<{ format: CredentialFormat; id: string }> = [
+  { format: 'mso_mdoc', id: 'eu.europa.ec.eudi.pid.de.1' },
+  { format: 'dc+sd-jwt', id: 'urn:eudi:pid:de:1' },
+]
+
 describe('presets.age — query generation', () => {
-  it('produces the default three-way alternative query, AV attestation first', () => {
+  it('produces an AV-attestation-only query by default', () => {
     expect(age().dcql).toEqual({
+      credentials: [
+        {
+          id: 'av_proof_of_age',
+          format: 'mso_mdoc',
+          meta: { doctype_value: 'eu.europa.ec.av.1' },
+          claims: [{ path: ['eu.europa.ec.av.1', 'age_over_18'], intent_to_retain: false }],
+        },
+      ],
+      credential_sets: [{ options: [['av_proof_of_age']] }],
+    })
+  })
+
+  it('keeps every non-mdoc format out of the default query', () => {
+    // A wallet that does not support a queried format rejects the whole request instead of
+    // skipping that alternative, so the default must never mention dc+sd-jwt.
+    expect(JSON.stringify(age().dcql)).not.toContain('sd-jwt')
+  })
+
+  it('treats an explicitly empty domesticPids the same as the default', () => {
+    expect(age({ domesticPids: [] }).dcql).toEqual(age().dcql)
+  })
+
+  it('expands to the three-way alternative query when domestic PIDs are given', () => {
+    expect(age({ domesticPids: GERMAN_PIDS }).dcql).toEqual({
       credentials: [
         {
           id: 'av_proof_of_age',
@@ -43,11 +74,11 @@ describe('presets.age — query generation', () => {
   })
 
   it('never asks the wallet to value-match the boolean', () => {
-    expect(JSON.stringify(age().dcql)).not.toContain('"values"')
+    expect(JSON.stringify(age({ domesticPids: GERMAN_PIDS }).dcql)).not.toContain('"values"')
   })
 
   it('reflects a non-default threshold in every claim path', () => {
-    const query = age({ threshold: 21 }).dcql
+    const query = age({ threshold: 21, domesticPids: GERMAN_PIDS }).dcql
     const serialized = JSON.stringify(query)
     expect(serialized).toContain('age_over_21')
     expect(serialized).toContain('"age_equal_or_over","21"')
@@ -60,7 +91,7 @@ describe('presets.age — query generation', () => {
     expectError('CONFIG_INVALID', () => age({ threshold: -18 }))
   })
 
-  it('replaces the domestic PID defaults with the given ones', () => {
+  it('accepts several domestic PIDs and merges the vct list', () => {
     const query = age({
       domesticPids: [
         { format: 'mso_mdoc', id: 'eu.europa.ec.eudi.pid.fr.1' },
@@ -78,14 +109,6 @@ describe('presets.age — query generation', () => {
     expect(query.credentials[1]?.meta.doctype_value).toBe('eu.europa.ec.eudi.pid.fr.1')
     expect(query.credentials[2]?.meta.doctype_value).toBe('eu.europa.ec.eudi.pid.it.1')
     expect(query.credentials[3]?.meta.vct_values).toEqual(['urn:eudi:pid:1', 'urn:eudi:pid:fr:1'])
-    expect(JSON.stringify(query)).not.toContain('pid.de')
-    crossValidate(query)
-  })
-
-  it('emits only the AV attestation when domesticPids is empty', () => {
-    const query = age({ domesticPids: [] }).dcql
-    expect(query.credentials.map((credential) => credential.id)).toEqual(['av_proof_of_age'])
-    expect(query.credential_sets).toEqual([{ options: [['av_proof_of_age']] }])
     crossValidate(query)
   })
 
@@ -100,7 +123,7 @@ describe('presets.age — query generation', () => {
   })
 
   it('adds the birth-date options last when the fallback is enabled', () => {
-    const query = age({ allowBirthDateFallback: true }).dcql
+    const query = age({ allowBirthDateFallback: true, domesticPids: GERMAN_PIDS }).dcql
     expect(query.credential_sets?.[0]?.options).toEqual([
       ['av_proof_of_age'],
       ['pid_mdoc_age'],
@@ -129,7 +152,21 @@ describe('presets.age — query generation', () => {
   it('every generated variant passes the dcql package', () => {
     crossValidate(age().dcql)
     crossValidate(age({ threshold: 65 }).dcql)
+    crossValidate(age({ domesticPids: GERMAN_PIDS }).dcql)
     crossValidate(age({ allowBirthDateFallback: true, includeMdl: true }).dcql)
+  })
+
+  it('declares the expected claim types for the DCQL post-validation', () => {
+    expect(age().claimTypes).toEqual({
+      av_proof_of_age: { age_over_18: { type: 'boolean' } },
+    })
+    expect(
+      age({ threshold: 21, domesticPids: GERMAN_PIDS, allowBirthDateFallback: true }).claimTypes
+    ).toEqual({
+      av_proof_of_age: { age_over_21: { type: 'boolean' } },
+      pid_mdoc_age: { age_over_21: { type: 'boolean' } },
+      pid_mdoc_birth_date: { birth_date: { type: 'string', redactValue: true } },
+    })
   })
 })
 
@@ -156,19 +193,21 @@ describe('presets.age — extract', () => {
 
   it('reads a domestic PID mdoc age claim', () => {
     expect(
-      age().extract([verifiedCredential('pid_mdoc_age', 'mso_mdoc', { age_over_18: true })])
+      age({ domesticPids: GERMAN_PIDS }).extract([
+        verifiedCredential('pid_mdoc_age', 'mso_mdoc', { age_over_18: true }),
+      ])
     ).toEqual({ ageOver: true, threshold: 18, source: 'pid-mdoc' })
   })
 
   it('reads the nested SD-JWT age_equal_or_over structure', () => {
     expect(
-      age().extract([
+      age({ domesticPids: GERMAN_PIDS }).extract([
         verifiedCredential('pid_sdjwt_age', 'dc+sd-jwt', { age_equal_or_over: { '18': true } }),
       ])
     ).toEqual({ ageOver: true, threshold: 18, source: 'pid-sdjwt' })
 
     expect(
-      age({ threshold: 21 }).extract([
+      age({ threshold: 21, domesticPids: GERMAN_PIDS }).extract([
         verifiedCredential('pid_sdjwt_age', 'dc+sd-jwt', { age_equal_or_over: { '21': false } }),
       ])
     ).toEqual({ ageOver: false, threshold: 21, source: 'pid-sdjwt' })
@@ -229,7 +268,7 @@ describe('presets.age — extract', () => {
   })
 
   it('prefers the AV attestation when several credentials are present', () => {
-    const result = age().extract([
+    const result = age({ domesticPids: GERMAN_PIDS }).extract([
       verifiedCredential('pid_mdoc_age', 'mso_mdoc', { age_over_18: false }),
       verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: true }),
     ])
@@ -242,17 +281,83 @@ describe('presets.age — extract', () => {
     )
   })
 
-  it('rejects a non-boolean age claim instead of coercing it', () => {
-    expectError('PRESENTATION_MALFORMED', () =>
-      age().extract([verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: 'true' })])
-    )
-  })
-
-  it('rejects a birth date that is not a full-date', () => {
-    expectError('PRESENTATION_MALFORMED', () =>
+  it('rejects a birth date that is not a full-date, without repeating the value', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
       age({ allowBirthDateFallback: true }).extract([
         verifiedCredential('pid_mdoc_birth_date', 'mso_mdoc', { birth_date: '27.07.2008' }),
       ])
     )
+    expect(error.message).not.toContain('2008')
+  })
+})
+
+describe('presets.age — extract error messages', () => {
+  it('reports the received type and value for a mistyped age claim', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: 'false' })])
+    )
+    expect(error.message).toBe(
+      'expected a boolean "age_over_18" claim, received a string ("false") — the credential ' +
+        'was issued with a value of the wrong type'
+    )
+  })
+
+  it('shows number values verbatim', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: 1 })])
+    )
+    expect(error.message).toBe(
+      'expected a boolean "age_over_18" claim, received a number (1) — the credential ' +
+        'was issued with a value of the wrong type'
+    )
+  })
+
+  it('names only the type for object values', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([
+        verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: { nested: true } }),
+      ])
+    )
+    expect(error.message).toBe(
+      'expected a boolean "age_over_18" claim, received an object — the credential ' +
+        'was issued with a value of the wrong type'
+    )
+  })
+
+  it('reports a missing claim as received undefined, without the issuance clause', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([verifiedCredential('av_proof_of_age', 'mso_mdoc', {})])
+    )
+    expect(error.message).toBe('expected a boolean "age_over_18" claim, received undefined')
+  })
+
+  it('keeps long or control-character string values out of the message', () => {
+    const long = 'x'.repeat(40)
+    const longError = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: long })])
+    )
+    expect(longError.message).toContain('received a string —')
+    expect(longError.message).not.toContain(long)
+
+    const sneakyError = expectError('PRESENTATION_MALFORMED', () =>
+      age().extract([
+        verifiedCredential('av_proof_of_age', 'mso_mdoc', { age_over_18: 'a\u0000b' }),
+      ])
+    )
+    expect(sneakyError.message).toContain('received a string —')
+    expect(sneakyError.message).not.toContain('a\u0000b')
+  })
+
+  it('never places a birth date value in the message, only its type', () => {
+    const error = expectError('PRESENTATION_MALFORMED', () =>
+      age({ allowBirthDateFallback: true }).extract([
+        verifiedCredential('pid_mdoc_birth_date', 'mso_mdoc', { birth_date: 19900115 }),
+      ])
+    )
+    expect(error.message).toBe(
+      'expected a string "birth_date" claim, received a number — the credential ' +
+        'was issued with a value of the wrong type'
+    )
+    expect(error.message).not.toContain('19900115')
   })
 })

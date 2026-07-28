@@ -104,7 +104,7 @@ export async function runVerification(input: EngineInput): Promise<VerificationR
     })
   }
 
-  postValidateDcql(input.dcql, presented, collector)
+  postValidateDcql(input.dcql, presented, collector, input.preset?.claimTypes)
 
   const enforcedFailures = collector.checks.filter(
     (check) => check.status === 'failed' && enforced(check, input.trust.mode)

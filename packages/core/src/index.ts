@@ -68,6 +68,8 @@ export type {
   Channel,
   Check,
   CheckId,
+  ClaimTypeExpectation,
+  ClaimValueType,
   ClientIdPrefix,
   CountryClaims,
   CountryOptions,

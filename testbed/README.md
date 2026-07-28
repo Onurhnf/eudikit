@@ -90,10 +90,23 @@ cd av-srv-trust-validator && ./gradlew bootRun --args='--server.port=8082'
 Verified against a real `Age Verification DS - 001` certificate pulled from the live list:
 `{"trusted": true, "trustAnchor": "…"}` in 44 ms.
 
-## 5. Device day checklist
+## 5. Device day checklist `VERIFIED`
 
-The order to work through with a phone on the desk. Nothing in this section has been run end to
-end yet — that is what the day is for — so every step carries the thing to look at when it stalls.
+The order to work through with a phone on the desk. This list has been run end to end — Samsung
+Galaxy S23, real AV wallet, tunnel transport, final verdict `verified: true` with
+`source: 'av-attestation'` — so each step carries the thing to look at when it stalls, plus what
+the run itself showed. Confirmed on the device:
+
+- **The deep link matches as generated.** The wallet's manifest (package `com.scytales.av`)
+  registers the schemes `av`, `avsp`, `eu.europa.ec.av`, `eudi-openid4vp`, `mdoc-openid4vp` and
+  `openid4vp`, each with the authorities `authorize`, `authorization`, `present` and
+  `credential_offer` — so the default `eudi-openid4vp://authorize?…` form resolves. A URI
+  without an authority (`scheme://?…`) matches nothing and fails silently.
+- **Our `SessionTranscript` bytes are the ones the wallet signs over.** The device signature of
+  a real presentation verified against the transcript rebuilt from the session record.
+- **A query with an unsupported format kills the whole request.** The wallet answers
+  `error=invalid_request` + `UnsupportedQueryFormats` instead of skipping the alternative it
+  cannot satisfy — the reason `presets.age()` asks for the AV attestation alone by default.
 
 1. **Install the wallet.** The APK and the two `adb` commands are in §2. `adb devices` has to list
    the phone as `device`; `unauthorized` means the USB-debugging prompt on the phone was never
@@ -103,23 +116,31 @@ end yet — that is what the day is for — so every step carries the thing to l
    needs plain internet for this step, not the USB forward, and the wallet reports issuer errors in
    its own UI rather than at presentation time.
 3. **Forward the port.** `adb reverse tcp:3000 tcp:3000`. *It is per-connection:* unplugging the
-   phone or restarting `adb` drops it silently, and the next request just times out.
+   phone, restarting `adb` or a flaky cable drops it silently, and the next request just times
+   out — a tunnel is not affected by any of this, which is why the tunnel path is the more
+   patient one for a long session.
 4. **Start the example app in USB mode.**
    ```bash
    EUDIKIT_PUBLIC_BASE_URL=http://localhost:3000 EUDIKIT_ALLOW_INSECURE_LOOPBACK=1 pnpm --filter @eudikit/example-next dev
    ```
    *Request creation throws `CONFIG_PUBLIC_BASE_URL_*`:* one of the two variables did not reach the
    process. The boot log prints the insecure-loopback warning when the switch is on.
+   *Every page crawls on the phone:* `next dev` serves modules one at a time, which is unbearable
+   through a forward or tunnel — build once (`pnpm --filter @eudikit/example-next build`) and run
+   `start` instead of `dev` with the same variables.
 5. **Open `http://localhost:3000` in the phone's browser.** *Page does not load:* step 3 is not up —
    the wallet is not involved yet. A tunnel URL (`examples/next/README.md`) is the alternative when
    the forward cannot be made to work.
 6. **Press the same-device link, not the QR code.** The QR is for scanning from a second device.
-   *Nothing opens:* the deep-link scheme this build registers is not `eudi-openid4vp` — check the
-   installed APK's intent filters and override it per request with `scheme`.
+   *Nothing opens:* not the default scheme — `eudi-openid4vp://authorize` is confirmed registered
+   (manifest details above). Check the URI carries an authority, and on a build of your own check
+   the installed APK's intent filters and override the scheme per request with `scheme`.
 7. **Approve in the wallet, then watch the page.** The result appears through polling.
    *Approved but the page never resolves:* the wallet could not POST back — the response goes to
    `http://localhost:3000/api/eudikit/wallet/response` over the same forward, so check the server
    log for the request arriving at all.
+   *The wallet shows "Vault key not available":* its own Android keystore session broke, nothing
+   on the verifier side — force-stop and reopen the wallet app and present again.
 8. **Read the verdict.** A `verified: false` in strict mode is a real answer, not a failure of the
    rig: the demo issuer is on the live AV list (§3), so a trust failure here is worth diffing
    against the reference verifier (§1) check by check.
@@ -131,12 +152,11 @@ Two things, in this order:
 1. **Comparison testing.** Feed the same `DeviceResponse` to the EU verifier and to
    `@eudikit/core`, and diff the verdicts check by check. Their twelve `MsoMdocCheck`s map onto our
    `CheckId` taxonomy one-to-one, so a disagreement is always locatable.
-2. **Closing the open questions** that cannot be closed at a desk:
-   whether the deep-link scheme is really `eudi-openid4vp` rather than
-   `av://`, what the `apk-key-hash` origin looks like in a real response, how a wrong protocol
-   fails on a real device, and whether the wallet's own `SessionTranscript` bytes match ours.
-
-On that last one, half the answer is already in: `@owf/mdoc` 0.7.0 and our encoder produce
-byte-identical `SessionTranscript`s, and both match the OpenID4VP 1.0 B.2.6 vectors
-(`packages/core/test/session-transcript.test.ts`). What remains is whether the *wallet* agrees —
-which needs a real device, which needs this rig.
+2. **Closing the open questions** that cannot be closed at a desk. The device day (§5) closed
+   two of them: the deep-link scheme really is `eudi-openid4vp` with an `authorize` authority,
+   and the wallet's `SessionTranscript` bytes match ours — the device signature of a real
+   presentation verified over the transcript we rebuild, completing the desk half of that
+   answer (`@owf/mdoc` 0.7.0, our encoder and the OpenID4VP 1.0 B.2.6 vectors are all
+   byte-identical, `packages/core/test/session-transcript.test.ts`). Still open: what the
+   `apk-key-hash` origin looks like in a real DC API response, and how a wrong protocol fails
+   on a real device.

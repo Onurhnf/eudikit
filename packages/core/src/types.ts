@@ -600,9 +600,30 @@ export interface KvLikeClient {
 // Presets
 // ---------------------------------------------------------------------------
 
+/** Primitive types the DCQL post-validation can require of a presented claim value. */
+export type ClaimValueType = 'boolean' | 'number' | 'string'
+
+export interface ClaimTypeExpectation {
+  type: ClaimValueType
+  /**
+   * Keep the presented value out of diagnostics and error messages, reporting only its type —
+   * for claims whose value is personal data (e.g. a birth date).
+   */
+  redactValue?: boolean
+}
+
 export interface PresetDefinition<TClaims = Record<string, unknown>> {
   readonly id: string
   readonly dcql: DcqlQuery
+  /**
+   * Expected value types for requested claims, keyed by credential query id and then by claim
+   * key (for mdoc, the data element identifier). Enforced during DCQL post-validation
+   * (`dcql.claim_types_valid`): a claim that arrives with the wrong type fails verification
+   * with the received type in the diagnostics, instead of surfacing later as an opaque claim
+   * extraction error. Claims without an entry are only checked for decoding to a usable
+   * (non-null) value.
+   */
+  readonly claimTypes?: Readonly<Record<string, Readonly<Record<string, ClaimTypeExpectation>>>>
   /** Produces typed claims from verified credentials; core calls this inside `verify()`. */
   readonly extract: (credentials: VerifiedCredential[]) => TClaims
 }
@@ -622,8 +643,11 @@ export interface AgeOptions {
    */
   threshold?: number
   /**
-   * Domestic PID doctypes/vcts (e.g. `eu.europa.ec.eudi.pid.de.1` / `urn:eudi:pid:de:1`).
-   * The German defaults are CLAIMED, not verified — override them for your market.
+   * Domestic PID doctypes/vcts to accept as alternatives to the AV attestation (e.g.
+   * `eu.europa.ec.eudi.pid.de.1` / `urn:eudi:pid:de:1`). Default: none — deployed wallets
+   * reject the whole request when the query includes a format they do not support, rather than
+   * skipping that alternative, so every additional format is opt-in. Check the identifiers
+   * against your market's PID rulebook before relying on them.
    */
   domesticPids?: Array<{ format: CredentialFormat; id: string }>
   /**

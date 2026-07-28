@@ -3,12 +3,25 @@
  * because the wallet's application of query constraints must never be trusted. These checks
  * cannot be disabled by configuration.
  *
+ * Two claim-level defects are kept apart on purpose: a requested claim that never arrived
+ * fails `dcql.claims_present`, while a claim that arrived with a value of the wrong type
+ * (against the preset's declared `claimTypes`) fails `dcql.claim_types_valid` with the
+ * received type in the report. Both fail verification; neither is left for claim extraction
+ * to stumble over.
+ *
  * Scope in this release: `mso_mdoc` presentations are checked claim by claim; a presentation
  * for a `dc+sd-jwt` query is reported through `sdjwt.decoded` as failed (SD-JWT VC verification
  * is not built yet), and `dcql.vct_match` reports `skipped` accordingly.
  */
 
-import type { DcqlCredentialQuery, DcqlQuery, VerifiedCredential } from '../types.js'
+import { wrongClaimType } from '../presets/claims.js'
+import type {
+  ClaimTypeExpectation,
+  DcqlCredentialQuery,
+  DcqlQuery,
+  PresetDefinition,
+  VerifiedCredential,
+} from '../types.js'
 import type { CheckCollector } from './checks.js'
 
 export interface PresentedCredential {
@@ -26,7 +39,8 @@ export interface PresentedCredential {
 export function postValidateDcql(
   dcql: DcqlQuery,
   presented: PresentedCredential[],
-  collector: CheckCollector
+  collector: CheckCollector,
+  claimTypes?: PresetDefinition['claimTypes']
 ): void {
   const queriesById = new Map<string, DcqlCredentialQuery>(
     dcql.credentials.map((query) => [query.id, query])
@@ -48,7 +62,7 @@ export function postValidateDcql(
     }
     if (entry.credential === null) continue
 
-    const ok = validateAgainstQuery(query, entry.credential, collector)
+    const ok = validateAgainstQuery(query, entry.credential, collector, claimTypes?.[query.id])
     if (ok && entry.chainPassed) satisfied.add(entry.queryId)
   }
 
@@ -58,10 +72,11 @@ export function postValidateDcql(
 function validateAgainstQuery(
   query: DcqlCredentialQuery,
   credential: VerifiedCredential,
-  collector: CheckCollector
+  collector: CheckCollector,
+  expected?: Readonly<Record<string, ClaimTypeExpectation>>
 ): boolean {
   if (query.format === 'mso_mdoc') {
-    return validateMdocQuery(query, credential, collector)
+    return validateMdocQuery(query, credential, collector, expected)
   }
   // The claim keys of an SD-JWT credential cannot be validated before SD-JWT verification
   // exists; the format mismatch itself has already been reported via sdjwt.decoded.
@@ -77,7 +92,8 @@ function validateAgainstQuery(
 function validateMdocQuery(
   query: DcqlCredentialQuery,
   credential: VerifiedCredential,
-  collector: CheckCollector
+  collector: CheckCollector,
+  expected?: Readonly<Record<string, ClaimTypeExpectation>>
 ): boolean {
   let ok = true
 
@@ -147,23 +163,44 @@ function validateMdocQuery(
   ok &&= claimsOk
 
   if (claimsOk) {
-    // Type-level sanity for the claims that arrived: a CBOR value that decodes to null/undefined
-    // cannot feed any business rule. Value semantics stay with the caller (preset `extract`).
-    const untyped = claims
-      .map((claim) => mdocElementIdentifier(claim.path))
-      .filter((identifier): identifier is string => identifier !== null)
-      .filter(
-        (identifier) => identifier in credential.claims && credential.claims[identifier] === null
-      )
+    // Claims that arrived must decode to usable values and — where the preset declared an
+    // expected type — to values of that type. A mis-issued credential (say, a boolean age flag
+    // embedded as text) fails here with the received type in the report, instead of surfacing
+    // later as an opaque claim extraction error. Value semantics (is the boolean true, is the
+    // person old enough) stay with the caller (preset `extract`).
+    const problems: string[] = []
+    for (const claim of claims) {
+      const identifier = mdocElementIdentifier(claim.path)
+      if (identifier === null) continue
+      const value = credential.claims[identifier]
+      if (value === undefined) continue
+      const expectation = expected?.[identifier]
+      if (expectation !== undefined && typeof value !== expectation.type) {
+        problems.push(
+          wrongClaimType(expectation.type, identifier, value, {
+            redactValue: expectation.redactValue === true,
+          })
+        )
+      } else if (value === null) {
+        problems.push(`"${identifier}" decodes to null`)
+      }
+    }
     collector.add(
       'dcql.claim_types_valid',
-      untyped.length === 0 ? 'passed' : 'failed',
-      untyped.length === 0
+      problems.length === 0 ? 'passed' : 'failed',
+      problems.length === 0
         ? 'every presented data element decodes to a usable value'
-        : `data elements decode to null: ${untyped.join(', ')}`,
+        : problems.join('; '),
       query.id
     )
-    ok &&= untyped.length === 0
+    ok &&= problems.length === 0
+  } else {
+    collector.add(
+      'dcql.claim_types_valid',
+      'skipped',
+      'not evaluated: requested data elements are missing (dcql.claims_present)',
+      query.id
+    )
   }
 
   return ok

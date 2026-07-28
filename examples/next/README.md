@@ -97,6 +97,15 @@ along with the reference verifier to compare verdicts against.
 - **The link does nothing on the phone.** The deep-link scheme defaults to `eudi-openid4vp`,
   which is what today's wallet builds register. Override it per request with `scheme` if your
   build differs.
+- **The wallet answers `error=invalid_request` with `UnsupportedQueryFormats`.** The query asks
+  for a credential format the wallet does not support, and the wallet rejects the whole request
+  rather than skipping that alternative. `presets.age()` defaults to the AV attestation alone
+  for exactly this reason — the error appears when extra formats were added (`domesticPids`, a
+  custom DCQL query).
+- **Every page takes forever on the phone.** `next dev` compiles and serves modules one at a
+  time, which is unbearably slow through a tunnel or USB forward. For device testing run the
+  production server instead: `pnpm --filter @eudikit/example-next build`, then `start` in place
+  of `dev` with the same environment variables.
 - **`verified: false` with trust failures.** In strict mode the issuer must be on the AV trusted
   list. A testbed issuer needs `EUDIKIT_TRUST_ANCHORS`, or `EUDIKIT_TRUST_MODE=permissive` while
   developing.

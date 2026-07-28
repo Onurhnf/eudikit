@@ -292,14 +292,56 @@ describe('verification chain — DCQL post-validation', () => {
     await postPresentation(verifier, created, presentation)
 
     const result = await failedResult(verifier, created.sessionId)
+    // A missing claim is a verification failure with a full report, never an extraction error.
+    expect(result.error?.code).toBe('VERIFICATION_FAILED')
     const claimsPresent = result.diagnostics.find(
       (check) => check.id === 'dcql.claims_present' && check.credentialId === 'av_proof_of_age'
     )
     expect(claimsPresent?.status).toBe('failed')
     expect(claimsPresent?.detail).toContain('age_over_21')
+    expect(checkStatuses(result.diagnostics, 'dcql.claim_types_valid')).toEqual(['skipped'])
     expect(checkStatuses(result.diagnostics, 'dcql.credential_sets_satisfied')).toContain('failed')
     // The chain itself was sound — the wallet answered a different question than asked.
     expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('passed')
+  })
+
+  it('fails dcql.claim_types_valid when the age flag arrives as text instead of a boolean', async () => {
+    const verifier = makeVerifier()
+    const created = await verifier.requests.create({
+      preset: presets.age({ threshold: 21 }),
+      channel: 'deep-link',
+    })
+    const params = deepLinkParams(created)
+
+    // A mis-issued credential: the requested attribute exists but was embedded as the string
+    // "false" instead of a CBOR boolean.
+    const issuerSigned = await issueAttestation({
+      issuer,
+      devicePublicJwk: device.publicJwk,
+      claims: { age_over_21: 'false' },
+    })
+    const presentation = await walletSignResponse({
+      issuerSigned,
+      devicePrivateJwk: device.privateJwk,
+      sessionTranscript: transcriptFor(params),
+    })
+    await postPresentation(verifier, created, presentation)
+
+    const result = await failedResult(verifier, created.sessionId)
+    expect(result.error?.code).toBe('VERIFICATION_FAILED')
+    const typesValid = result.diagnostics.find(
+      (check) => check.id === 'dcql.claim_types_valid' && check.credentialId === 'av_proof_of_age'
+    )
+    expect(typesValid?.status).toBe('failed')
+    expect(typesValid?.detail).toBe(
+      'expected a boolean "age_over_21" claim, received a string ("false") — the credential ' +
+        'was issued with a value of the wrong type'
+    )
+    // The claim was present — only its type is wrong, and the report keeps the two apart.
+    expect(checkStatuses(result.diagnostics, 'dcql.claims_present')).toEqual(['passed'])
+    expect(checkStatuses(result.diagnostics, 'dcql.credential_sets_satisfied')).toContain('failed')
+    expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('passed')
+    expect(checkStatuses(result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
   })
 
   it('fails dcql.doctype_match when the presented docType differs from the query', async () => {
