@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createVerifier, memorySessionAdapter, presets } from '../src/index.js'
 import { buildOpenID4VPSessionTranscript } from '../src/mdoc/session-transcript.js'
 import type { Check, CreatedRequest, Verifier, VerifierConfig } from '../src/types.js'
+import { JWE_KID_KEY_PREFIX, REQUEST_KEY_PREFIX } from '../src/verifier/create-request.js'
 import { encryptWalletResponse } from './support-jwe.js'
 import {
   FIXED_NOW,
@@ -242,6 +243,28 @@ describe('direct_post.jwt — failure modes', () => {
     const status = await flow.verifier.getResult(flow.created.sessionId)
     if (status.status !== 'failed') throw new Error('expected failed')
     expect(checkStatus(status.result.diagnostics, 'mdoc.device_signature_valid')).toBe('failed')
+  })
+
+  it('consumes both session keys, so each replay lock stands on its own', async () => {
+    // The replay defense rests on two atomic consumptions — the kid index and the request
+    // record. A round trip that leaves either key behind still answers a replay with 400
+    // (the other lock catches it), so the outcome alone cannot tell the two apart. The store
+    // can: after a completed exchange nothing addressable may survive.
+    const session = memorySessionAdapter()
+    const flow = await startFlow(makeVerifier({ session }))
+    const kid = flow.encryptionJwk.kid as string
+    expect(await session.get(`${REQUEST_KEY_PREFIX}${flow.state}`)).not.toBeNull()
+    expect(await session.get(`${JWE_KID_KEY_PREFIX}${kid}`)).not.toBeNull()
+
+    const jwe = await encryptWalletResponse({
+      payload: { vp_token: { av_proof_of_age: [await signPresentation(flow)] }, state: flow.state },
+      recipientJwk: flow.encryptionJwk,
+      apv: flow.nonce,
+    })
+    expect((await post(flow.verifier, new URLSearchParams({ response: jwe }))).status).toBe(200)
+
+    expect(await session.get(`${REQUEST_KEY_PREFIX}${flow.state}`)).toBeNull()
+    expect(await session.get(`${JWE_KID_KEY_PREFIX}${kid}`)).toBeNull()
   })
 
   it('finds nothing on a replayed JWE — atomic consumption covers the kid index too', async () => {

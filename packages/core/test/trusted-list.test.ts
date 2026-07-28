@@ -273,6 +273,8 @@ describe('TrustedListSource — cache and freshness', () => {
 
 const issuer: IssuerFixture = makeIssuer('Listed DS')
 const outsider: IssuerFixture = makeIssuer('Unlisted DS')
+/** Same subject as the listed DS, different key — membership is bytes, not names. */
+const impostor: IssuerFixture = makeIssuer('Listed DS')
 const device = p256KeyPair()
 
 const PUBLIC_BASE = 'https://av-demo.example'
@@ -415,6 +417,19 @@ describe('trusted list — end-to-end trust decisions', () => {
     expect(statusOf(status.result.diagnostics, 'trust.issuer_in_trusted_list')).toEqual(['failed'])
     expect(statusOf(status.result.diagnostics, 'trust.chain_valid')).toContain('failed')
     expect(status.result.credentials[0]?.issuer.trustedListEntry).toBeNull()
+  })
+
+  it('rejects a DS that copies a listed subject but is not the listed certificate', async () => {
+    // Membership is decided on the certificate bytes. A distinguished name is free to copy, so
+    // a self-signed certificate carrying the listed service's subject must still be a stranger.
+    const { verifier } = makeListVerifier({ fetchScript: [LISTED_XML] })
+    const sessionId = await respond(verifier, impostor)
+    const status = await verifier.getResult(sessionId)
+    if (status.status !== 'failed') throw new Error('expected failed')
+    expect(statusOf(status.result.diagnostics, 'trust.issuer_in_trusted_list')).toEqual(['failed'])
+    expect(status.result.credentials[0]?.issuer.trustedListEntry).toBeNull()
+    // Its own signature is perfectly valid — being self-consistent is not being trusted.
+    expect(statusOf(status.result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
   })
 
   it('accepts a DS absent from the list but covered by additionalTrustAnchors (union)', async () => {

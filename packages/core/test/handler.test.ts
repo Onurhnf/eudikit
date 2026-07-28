@@ -439,22 +439,29 @@ describe('handler — request_uri route and secrets hygiene', () => {
   })
 
   it('never leaks private key material through any handler response', async () => {
+    const session = memorySessionAdapter()
     const { handler } = makeHandler(
-      { profile: 'eudi', expectedOrigins: ['https://shop.example'] },
+      { profile: 'eudi', expectedOrigins: ['https://shop.example'], session },
       { requests: { age: { preset: presets.age() } }, exposeDiagnostics: true }
     )
     const createdResponse = await handler(
       jsonPost(`${BASE}/requests`, { name: 'age', channel: 'dc-api' })
     )
     const createdText = await createdResponse.text()
-    // The ephemeral pair's private scalar lives in the session record only; the public JWK
-    // in client_metadata has x/y and no "d".
-    expect(createdText).toContain('"client_metadata"')
-    expect(createdText).not.toContain('"d"')
-
     const created = JSON.parse(createdText) as { sessionId: string }
+
+    // The ephemeral pair's private scalar lives in the session record only; the published
+    // client_metadata carries the public half. The scalar itself is what must not appear —
+    // searching for the `"d"` key alone would both miss a renamed field and trip over any
+    // claim that happens to be called d.
+    const record = await session.get(`request:${created.sessionId}`)
+    const privateD = (record?.ephemeralPrivateJwk as { d?: string } | undefined)?.d
+    expect(typeof privateD).toBe('string')
+    expect(createdText).toContain('"client_metadata"')
+    expect(createdText).not.toContain(privateD as string)
+
     const polled = await handler(get(`${BASE}/sessions/${created.sessionId}`))
-    expect(await polled.text()).not.toContain('"d"')
+    expect(await polled.text()).not.toContain(privateD as string)
   })
 })
 

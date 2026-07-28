@@ -235,7 +235,14 @@ export interface WalletSignOptions {
   issuerSigned: IssuerSigned
   devicePrivateJwk: Record<string, unknown>
   sessionTranscript: Uint8Array
+  /**
+   * The document's own docType, which the wallet also signs `DeviceAuthentication` over.
+   * Defaults to the AV doctype; passing one that differs from the MSO's produces the relabelled
+   * credential the doctype-consistency check exists for.
+   */
   docType?: string
+  /** `DeviceResponse` status (ISO 18013-5 table 8); 0 is OK. */
+  status?: number
 }
 
 /**
@@ -258,7 +265,7 @@ export async function walletSignResponse(options: WalletSignOptions): Promise<st
   })
   const response: DeviceResponseType = DeviceResponse.createSimple({
     documents: [document],
-    status: 0,
+    status: options.status ?? 0,
   })
   return response.encodedForOid4Vp
 }

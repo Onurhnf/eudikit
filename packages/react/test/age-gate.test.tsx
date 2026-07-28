@@ -59,6 +59,8 @@ describe('<AgeGate/>', () => {
     await advance(1500)
 
     expect(screen.getByText('Adults only')).not.toBeNull()
+    // A passing answer is not a declined one: the neutral line stays out of sight.
+    expect(screen.queryByText(en.declined)).toBeNull()
     expect(onVerified).toHaveBeenCalledTimes(1)
     expect(onVerified).toHaveBeenCalledWith(VERIFIED_BODY.claims)
   })
@@ -218,8 +220,18 @@ describe('<AgeGate/> decision', () => {
     expect(onVerified).toHaveBeenCalledWith(VERIFIED_NEGATIVE_BODY.claims)
   })
 
-  it('opens the gate only for a passing answer, with no declined line in sight', async () => {
-    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
+  it('keeps the gate closed when the claim is truthy but not the boolean true', async () => {
+    // The default policy compares against `true`, not truthiness, because a wallet or a custom
+    // preset can hand over the string "false" — which every truthiness test in the world passes.
+    installFetch((call) =>
+      call.url.endsWith('/requests')
+        ? createdQr()
+        : {
+            status: 'verified',
+            verified: true,
+            claims: { ageOver: 'false', threshold: 18, source: 'av-attestation' },
+          }
+    )
     render(
       <AgeGate endpoint={ENDPOINT}>
         <p>Adults only</p>
@@ -229,8 +241,8 @@ describe('<AgeGate/> decision', () => {
     await clickVerify()
     await advance(1500)
 
-    expect(screen.getByText('Adults only')).not.toBeNull()
-    expect(screen.queryByText(en.declined)).toBeNull()
+    expect(screen.queryByText('Adults only')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe(en.declined)
   })
 
   it('lets decide replace the default policy', async () => {
@@ -286,7 +298,7 @@ describe('<AgeGate/> render prop', () => {
             >
               {state.labels.trigger}
             </button>
-            <output>{state.status}</output>
+            <output>{`${state.status}/${state.decision}`}</output>
             {state.status === 'verified' && <p>Kapı açık</p>}
           </div>
         )}
@@ -300,12 +312,12 @@ describe('<AgeGate/> render prop', () => {
     await act(async () => {
       fireEvent.click(button)
     })
-    expect(container.querySelector('output')?.textContent).toBe('polling')
+    expect(container.querySelector('output')?.textContent).toBe('polling/pending')
     expect(container.querySelector('[data-part]')).toBeNull()
 
     await advance(1500)
     // The verified state is the function's to render too — no automatic children swap.
-    expect(container.querySelector('output')?.textContent).toBe('verified')
+    expect(container.querySelector('output')?.textContent).toBe('verified/passed')
     expect(screen.getByText('Kapı açık')).not.toBeNull()
   })
 
@@ -342,34 +354,6 @@ describe('<AgeGate/> render prop', () => {
     expect(outcome()).toBe('verified/declined')
     expect(screen.getByText(en.declined)).not.toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
-  })
-
-  it('reports a passing decision next to the verified status', async () => {
-    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
-    const { container } = render(
-      <AgeGate endpoint={ENDPOINT}>
-        {(state) => (
-          <div>
-            <button
-              type="button"
-              onClick={() => {
-                void state.start()
-              }}
-            >
-              go
-            </button>
-            <output>{`${state.status}/${state.decision}`}</output>
-          </div>
-        )}
-      </AgeGate>
-    )
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'go' }))
-    })
-    await advance(1500)
-
-    expect(container.querySelector('output')?.textContent).toBe('verified/passed')
   })
 })
 

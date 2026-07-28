@@ -215,6 +215,12 @@ describe('redisSessionAdapter', () => {
     expect(await adapter.consume('sess')).toEqual({ nonce: 'abc' })
     expect(fake.eval).toHaveBeenCalledTimes(1)
     expect(fake.eval?.mock.calls[0]?.[1]).toEqual(['eudikit:sess'])
+    // The fake cannot run Lua, so the atomicity claim rests on the script text itself: one
+    // round trip that reads and deletes the same key. A fake that reimplements the semantics
+    // would otherwise be proving its own behaviour rather than the adapter's.
+    const script = String(fake.eval?.mock.calls[0]?.[0])
+    expect(script).toContain("redis.call('GET', KEYS[1])")
+    expect(script).toContain("redis.call('DEL', KEYS[1])")
     expect(await adapter.consume('sess')).toBeNull()
     expect(await adapter.get('sess')).toBeNull()
   })

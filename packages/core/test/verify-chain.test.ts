@@ -8,14 +8,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createVerifier, memorySessionAdapter, presets } from '../src/index.js'
 import { buildOpenID4VPSessionTranscript } from '../src/mdoc/session-transcript.js'
-import type { Check, CreatedRequest, Verifier, VerifierConfig } from '../src/types.js'
+import type { Check, CreatedRequest, DcqlQuery, Verifier, VerifierConfig } from '../src/types.js'
 import { expectEudikitError } from './support.js'
 import {
+  AV_DOCTYPE,
   FIXED_NOW,
   type IssuerFixture,
   issueAttestation,
   makeIssuer,
   p256KeyPair,
+  selfSignedCertificate,
   walletSignResponse,
 } from './support-mdoc.js'
 
@@ -108,9 +110,73 @@ describe('verification chain — nonce and transcript binding', () => {
     const result = await failedResult(verifier, created.sessionId)
     expect(result.error?.code).toBe('VERIFICATION_FAILED')
     expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('failed')
+    // The report may not claim device binding either: nothing proved the presenting device
+    // holds the key the MSO attests.
+    expect(checkStatuses(result.diagnostics, 'mdoc.device_key_matches_mso')).toContain('failed')
+    // A presentation whose chain failed cannot count towards the credential set — the DCQL
+    // layer must not paper over a broken signature.
+    expect(checkStatuses(result.diagnostics, 'dcql.credential_sets_satisfied')).toEqual(['failed'])
     // The issuer half is untouched: only the device binding broke.
     expect(checkStatuses(result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
     expect(checkStatuses(result.diagnostics, 'mdoc.value_digests_valid')).not.toContain('failed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// document envelope: response status, relabelled MSO
+// ---------------------------------------------------------------------------
+
+describe('verification chain — document envelope', () => {
+  it('fails mdoc.response_status_ok when the wallet reports an error status', async () => {
+    const verifier = makeVerifier()
+    const created = await verifier.requests.create({ preset: presets.age(), channel: 'deep-link' })
+    const params = deepLinkParams(created)
+
+    const issuerSigned = await issueAttestation({ issuer, devicePublicJwk: device.publicJwk })
+    const presentation = await walletSignResponse({
+      issuerSigned,
+      devicePrivateJwk: device.privateJwk,
+      sessionTranscript: transcriptFor(params),
+      // ISO 18013-5 table 8: anything but 0 means the wallet is reporting a problem, and a
+      // document riding along with it must not be treated as an answer.
+      status: 10,
+    })
+    await postPresentation(verifier, created, presentation)
+
+    const result = await failedResult(verifier, created.sessionId)
+    expect(checkStatuses(result.diagnostics, 'mdoc.response_status_ok')).toEqual(['failed'])
+    expect(result.verified).toBe(false)
+    // The credential inside is sound — only the envelope says otherwise.
+    expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('passed')
+    expect(checkStatuses(result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
+  })
+
+  it('fails mdoc.doctype_consistent when a document relabels a foreign MSO', async () => {
+    const verifier = makeVerifier()
+    const created = await verifier.requests.create({ preset: presets.age(), channel: 'deep-link' })
+    const params = deepLinkParams(created)
+
+    // The MSO attests a different doctype; the document claims the one the query asked for. The
+    // DCQL comparison reads the document, so only the MSO cross-check can catch the relabelling.
+    const issuerSigned = await issueAttestation({
+      issuer,
+      devicePublicJwk: device.publicJwk,
+      docType: 'eu.example.other.1',
+      namespace: AV_DOCTYPE,
+      claims: { age_over_18: true },
+    })
+    const presentation = await walletSignResponse({
+      issuerSigned,
+      devicePrivateJwk: device.privateJwk,
+      sessionTranscript: transcriptFor(params),
+      docType: AV_DOCTYPE,
+    })
+    await postPresentation(verifier, created, presentation)
+
+    const result = await failedResult(verifier, created.sessionId)
+    expect(checkStatuses(result.diagnostics, 'mdoc.doctype_consistent')).toEqual(['failed'])
+    expect(checkStatuses(result.diagnostics, 'dcql.doctype_match')).toEqual(['passed'])
+    expect(result.verified).toBe(false)
   })
 })
 
@@ -204,6 +270,46 @@ describe('verification chain — trust policy', () => {
     expect(status.result.policy).toBe('permissive')
     expect(checkStatuses(status.result.diagnostics, 'trust.chain_valid')).toContain('failed')
     expect(status.result.claims).toEqual({ ageOver: true, threshold: 18, source: 'av-attestation' })
+  })
+
+  it('rejects a DS certificate that is past its own validity period', async () => {
+    // The anchor is configured and byte-matches, so the only thing wrong is the clock: an
+    // expired signer must not keep vouching for credentials. Revocation is out of scope in this
+    // release, which leaves this window as the one thing that ages a DS out.
+    const expiredKeys = p256KeyPair()
+    const expired: IssuerFixture = {
+      keys: expiredKeys,
+      certificate: selfSignedCertificate(expiredKeys, {
+        commonName: 'Expired DS',
+        notBefore: new Date(FIXED_NOW.getTime() - 400 * 86_400_000),
+        notAfter: new Date(FIXED_NOW.getTime() - 86_400_000),
+      }),
+    }
+    const verifier = makeVerifier({
+      trust: { additionalTrustAnchors: [expired.certificate], avTrustedList: false },
+    })
+    const created = await verifier.requests.create({ preset: presets.age(), channel: 'deep-link' })
+    const params = deepLinkParams(created)
+
+    // Signed while the certificate was still live, so the MSO's own window stays clean.
+    const signed = new Date(FIXED_NOW.getTime() - 30 * 86_400_000)
+    const issuerSigned = await issueAttestation({
+      issuer: expired,
+      devicePublicJwk: device.publicJwk,
+      validity: { signed, validFrom: signed },
+    })
+    const presentation = await walletSignResponse({
+      issuerSigned,
+      devicePrivateJwk: device.privateJwk,
+      sessionTranscript: transcriptFor(params),
+    })
+    await postPresentation(verifier, created, presentation)
+
+    const result = await failedResult(verifier, created.sessionId)
+    expect(checkStatuses(result.diagnostics, 'trust.chain_valid')).toContain('failed')
+    // Exactly one link broke: the MSO is inside its own window and the signatures verify.
+    expect(checkStatuses(result.diagnostics, 'mdoc.validity_window')).not.toContain('failed')
+    expect(checkStatuses(result.diagnostics, 'mdoc.issuer_signature_valid')).toEqual(['passed'])
   })
 
   it('permissive mode still rejects a broken device signature — only trust relaxes', async () => {
@@ -366,6 +472,49 @@ describe('verification chain — DCQL post-validation', () => {
 
     const result = await failedResult(verifier, created.sessionId)
     expect(checkStatuses(result.diagnostics, 'dcql.doctype_match')).toContain('failed')
+  })
+
+  it('fails a raw query without credential_sets when one of its credentials is missing', async () => {
+    // Without credential_sets every credential query must be satisfied (OpenID4VP 1.0 §6.4.2) —
+    // a rule with its own code path, reached only by raw dcql queries, never by a preset.
+    const dcql: DcqlQuery = {
+      credentials: [
+        {
+          id: 'av_age',
+          format: 'mso_mdoc',
+          meta: { doctype_value: AV_DOCTYPE },
+          claims: [{ path: [AV_DOCTYPE, 'age_over_18'], intent_to_retain: false }],
+        },
+        {
+          id: 'second_credential',
+          format: 'mso_mdoc',
+          meta: { doctype_value: 'eu.example.other.1' },
+          claims: [{ path: ['eu.example.other.1', 'age_over_18'], intent_to_retain: false }],
+        },
+      ],
+    }
+    const verifier = makeVerifier()
+    const created = await verifier.requests.create({ dcql, channel: 'deep-link' })
+    const params = deepLinkParams(created)
+
+    const issuerSigned = await issueAttestation({ issuer, devicePublicJwk: device.publicJwk })
+    const presentation = await walletSignResponse({
+      issuerSigned,
+      devicePrivateJwk: device.privateJwk,
+      sessionTranscript: transcriptFor(params),
+    })
+    // The wallet answers half the request and stays silent about the rest.
+    await postPresentation(verifier, created, presentation, 'av_age')
+
+    const result = await failedResult(verifier, created.sessionId)
+    const satisfied = result.diagnostics.find(
+      (check) => check.id === 'dcql.credential_sets_satisfied'
+    )
+    expect(satisfied?.status).toBe('failed')
+    expect(satisfied?.detail).toContain('second_credential')
+    // The half that did arrive is sound; the request as a whole is not answered.
+    expect(checkStatuses(result.diagnostics, 'dcql.claims_present')).toEqual(['passed'])
+    expect(checkStatuses(result.diagnostics, 'mdoc.device_signature_valid')).toContain('passed')
   })
 
   it('rejects a vp_token entry whose query id is not part of the request', async () => {
