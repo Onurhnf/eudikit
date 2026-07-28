@@ -75,6 +75,16 @@ h1 {
   color: #b3261e;
 }
 
+/*
+ * A verified "no" is an outcome, not an error: the widget keeps role="alert" for real failures
+ * and marks this state data-state="declined", so it gets a quiet emphasis instead of the alert
+ * red.
+ */
+.gate [data-part='status'][data-state='declined'] {
+  border-left: 3px solid var(--line);
+  padding-left: 0.75rem;
+}
+
 footer {
   margin-top: 3rem;
   font-size: 0.85rem;

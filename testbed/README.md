@@ -145,7 +145,29 @@ the run itself showed. Confirmed on the device:
    rig: the demo issuer is on the live AV list (§3), so a trust failure here is worth diffing
    against the reference verifier (§1) check by check.
 
-## 6. What this rig is for
+## 6. Known upstream quirk: optional `age_over_NN` values are issued as strings
+
+The AV attestation profile (Annex A) types `age_over_18` — and every optional `age_over_NN`
+threshold — as `bool`. The reference issuer's dynamic issuance form does not honour that: in
+`av-srv-web-issuing-avw-py`, `app/templates/dynamic/dynamic-form.html` renders bool-typed
+fields as a checkbox backed by a hidden input and submits the value as the *string*
+`'true'`/`'false'`, and nothing on the Python side converts it back. The mandatory
+`age_over_18` reaches the credential as a proper CBOR boolean through the standard flow; an
+optional threshold added by hand through the dynamic form arrives as a string.
+
+eudikit rejects such a claim on purpose: the spec says `bool`, and coercing the string
+`"false"` to a boolean inside an age check is exactly the kind of silent repair a verifier must
+never perform. The failure names what actually arrived —
+
+```
+expected a boolean "age_over_21" claim, received a string ("false") — the credential was issued
+with a value of the wrong type
+```
+
+— so when a testbed credential carries hand-added optional thresholds, expect this verdict. It
+is the issuer's bug, not the wallet's and not the rig's.
+
+## 7. What this rig is for
 
 Two things, in this order:
 

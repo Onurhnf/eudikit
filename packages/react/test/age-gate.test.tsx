@@ -17,6 +17,7 @@ import {
   removeDigitalCredentials,
   setVisibility,
   VERIFIED_BODY,
+  VERIFIED_NEGATIVE_BODY,
 } from './support.js'
 
 beforeEach(() => {
@@ -189,6 +190,87 @@ describe('<AgeGate/>', () => {
   })
 })
 
+describe('<AgeGate/> decision', () => {
+  it('keeps the gate closed on an authentic negative answer, without treating it as an error', async () => {
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_NEGATIVE_BODY))
+    const onVerified = vi.fn()
+    const onError = vi.fn()
+    const { container } = render(
+      <AgeGate endpoint={ENDPOINT} onVerified={onVerified} onError={onError}>
+        <p>Adults only</p>
+      </AgeGate>
+    )
+
+    await clickVerify()
+    await advance(1500)
+
+    // The presentation verified — the wallet's answer was simply "no". The gate stays closed.
+    expect(screen.queryByText('Adults only')).toBeNull()
+    expect(container.querySelector('[data-part="root"]')?.getAttribute('data-state')).toBe(
+      'declined'
+    )
+    expect(screen.getByRole('status').textContent).toBe(en.declined)
+    // Not a failure: no alert, no error callback — but the machine truth still reaches
+    // onVerified, negative claims included.
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(onError).not.toHaveBeenCalled()
+    expect(onVerified).toHaveBeenCalledTimes(1)
+    expect(onVerified).toHaveBeenCalledWith(VERIFIED_NEGATIVE_BODY.claims)
+  })
+
+  it('opens the gate only for a passing answer, with no declined line in sight', async () => {
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
+    render(
+      <AgeGate endpoint={ENDPOINT}>
+        <p>Adults only</p>
+      </AgeGate>
+    )
+
+    await clickVerify()
+    await advance(1500)
+
+    expect(screen.getByText('Adults only')).not.toBeNull()
+    expect(screen.queryByText(en.declined)).toBeNull()
+  })
+
+  it('lets decide replace the default policy', async () => {
+    const countryBody = {
+      status: 'verified',
+      verified: true,
+      claims: { attribute: 'nationality', countries: ['DE', 'FR'] },
+    }
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : countryBody))
+    render(
+      <AgeGate
+        endpoint={ENDPOINT}
+        decide={(claims) => Array.isArray(claims?.countries) && claims.countries.includes('DE')}
+      >
+        <p>Willkommen</p>
+      </AgeGate>
+    )
+
+    await clickVerify()
+    await advance(1500)
+
+    expect(screen.getByText('Willkommen')).not.toBeNull()
+  })
+
+  it('declines when decide rejects claims the default policy would pass', async () => {
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
+    render(
+      <AgeGate endpoint={ENDPOINT} decide={() => false}>
+        <p>Adults only</p>
+      </AgeGate>
+    )
+
+    await clickVerify()
+    await advance(1500)
+
+    expect(screen.queryByText('Adults only')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe(en.declined)
+  })
+})
+
 describe('<AgeGate/> render prop', () => {
   it('hands the hook state plus resolved labels to children and renders no default UI', async () => {
     installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
@@ -225,6 +307,69 @@ describe('<AgeGate/> render prop', () => {
     // The verified state is the function's to render too — no automatic children swap.
     expect(container.querySelector('output')?.textContent).toBe('verified')
     expect(screen.getByText('Kapı açık')).not.toBeNull()
+  })
+
+  it('hands the decision alongside the status, so a custom UI can tell "authentic" from "passing"', async () => {
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_NEGATIVE_BODY))
+    const { container } = render(
+      <AgeGate endpoint={ENDPOINT}>
+        {(state) => (
+          <div>
+            <button
+              type="button"
+              onClick={() => {
+                void state.start()
+              }}
+            >
+              go
+            </button>
+            <output>{`${state.status}/${state.decision}`}</output>
+            {state.decision === 'declined' && <p>{state.labels.declined}</p>}
+            {state.error !== null && <p role="alert">boom</p>}
+          </div>
+        )}
+      </AgeGate>
+    )
+    const outcome = (): string | undefined => container.querySelector('output')?.textContent
+
+    expect(outcome()).toBe('idle/pending')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'go' }))
+    })
+    expect(outcome()).toBe('polling/pending')
+
+    await advance(1500)
+    expect(outcome()).toBe('verified/declined')
+    expect(screen.getByText(en.declined)).not.toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('reports a passing decision next to the verified status', async () => {
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : VERIFIED_BODY))
+    const { container } = render(
+      <AgeGate endpoint={ENDPOINT}>
+        {(state) => (
+          <div>
+            <button
+              type="button"
+              onClick={() => {
+                void state.start()
+              }}
+            >
+              go
+            </button>
+            <output>{`${state.status}/${state.decision}`}</output>
+          </div>
+        )}
+      </AgeGate>
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'go' }))
+    })
+    await advance(1500)
+
+    expect(container.querySelector('output')?.textContent).toBe('verified/passed')
   })
 })
 
@@ -313,6 +458,38 @@ describe('<AgeGate/> styling contract', () => {
     expect(part('error')?.getAttribute('data-state')).toBe('failed')
     expect(part('error')?.textContent).toBe(en.errors.WALLET_REJECTED_REQUEST)
     expect(part('cancel')).toBeNull()
+  })
+
+  it('marks every part declined when a verified answer does not pass', async () => {
+    let result: unknown = { status: 'pending' }
+    installFetch((call) => (call.url.endsWith('/requests') ? createdQr() : result))
+    const { container } = render(
+      <AgeGate endpoint={ENDPOINT}>
+        <p>Adults only</p>
+      </AgeGate>
+    )
+    const part = (name: string): Element | null => container.querySelector(`[data-part="${name}"]`)
+
+    await clickVerify()
+    expect(part('qr')).not.toBeNull()
+
+    result = VERIFIED_NEGATIVE_BODY
+    await advance(1500)
+
+    // `declined` replaces `verified` on the whole contract, legacy attribute included — CSS
+    // keyed on the verified state must not reach an authentic "no".
+    expect(part('root')?.getAttribute('data-state')).toBe('declined')
+    expect(part('root')?.getAttribute('data-eudikit-status')).toBe('declined')
+    expect(part('trigger')?.getAttribute('data-state')).toBe('declined')
+    expect(part('trigger')?.hasAttribute('disabled')).toBe(false)
+    expect(part('status')?.getAttribute('data-state')).toBe('declined')
+    expect(part('status')?.textContent).toBe(en.declined)
+    // The session is settled: no stale QR inviting a second scan, no cancel, and no alert.
+    expect(part('panel')).toBeNull()
+    expect(part('qr')).toBeNull()
+    expect(part('cancel')).toBeNull()
+    expect(part('error')).toBeNull()
+    expect(screen.queryByText('Adults only')).toBeNull()
   })
 
   it('keeps the status line a polite live region and the root in the catalog language', () => {

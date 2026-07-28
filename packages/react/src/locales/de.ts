@@ -17,6 +17,7 @@ export const de: EudikitReactLabels = {
     failed: '',
     expired: 'Diese Anfrage ist abgelaufen. Beginnen Sie erneut, wenn Sie bereit sind.',
   },
+  declined: 'Die Antwort Ihrer Wallet erfüllt die Voraussetzung für diese Seite nicht.',
   errors: {
     USER_DECLINED_OR_NO_CREDENTIAL:
       'Es wurde nichts geteilt. Entweder wurde die Anfrage abgelehnt, oder Ihre Wallet enthält ' +

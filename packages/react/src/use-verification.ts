@@ -74,6 +74,12 @@ export interface UseVerificationOptions {
 }
 
 export interface UseVerificationResult {
+  /**
+   * `'verified'` means the presentation was verified — authentic, bound to this session,
+   * matching the query. It says nothing about whether the answer satisfies your policy: a
+   * wallet can truthfully present `age_over_18: false`, and that presentation verifies. The
+   * answer lives in `claims`; deciding what it is worth is the UI layer's job, not this hook's.
+   */
   status: VerificationStatus
   /**
    * MUST be called from a user gesture: the Digital Credentials API consumes transient

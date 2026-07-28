@@ -64,6 +64,12 @@ export interface EudikitReactLabels {
   qrLabel: string
   /** The live status line, by verification status. An empty string renders an empty region. */
   status: Record<VerificationStatus, string>
+  /**
+   * The line for a verified answer that does not pass the gate. An outcome, not an error: it
+   * speaks through the polite status region, never the alert, and must not blame the person —
+   * the wallet answered honestly.
+   */
+  declined: string
   /** Failure copy by user-facing code, plus the mandatory `generic` line for everything else. */
   errors: Record<UserFacingErrorCode | 'generic', string>
 }
@@ -92,6 +98,7 @@ export function getLabels(
     scanQrHint: pick(overrides?.scanQrHint, base.scanQrHint),
     qrLabel: pick(overrides?.qrLabel, base.qrLabel),
     status: mergeSection(base.status, overrides?.status),
+    declined: pick(overrides?.declined, base.declined),
     errors: mergeSection(base.errors, overrides?.errors),
   }
 }

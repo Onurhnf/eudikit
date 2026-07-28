@@ -84,6 +84,16 @@ export const VERIFIED_BODY = {
   claims: { ageOver: true, threshold: 18, source: 'av-attestation' },
 }
 
+/**
+ * An authentic "no": the presentation verified — issuer signature, session binding, the lot —
+ * and the answer inside it is negative. `verified` speaks for the proof, never for the answer.
+ */
+export const VERIFIED_NEGATIVE_BODY = {
+  status: 'verified',
+  verified: true,
+  claims: { ageOver: false, threshold: 18, source: 'av-attestation' },
+}
+
 // ---------------------------------------------------------------------------
 // Digital Credentials API stub
 // ---------------------------------------------------------------------------

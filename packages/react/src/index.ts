@@ -19,7 +19,12 @@
  * The label catalogs (plain data, usable in server components) live at `@eudikit/react/locales`.
  */
 
-export { AgeGate, type AgeGateProps, type AgeGateRenderState } from './age-gate.js'
+export {
+  AgeGate,
+  type AgeGateDecision,
+  type AgeGateProps,
+  type AgeGateRenderState,
+} from './age-gate.js'
 export { DC_API_PROTOCOLS, digitalCredentialsAvailable } from './dc-api.js'
 export {
   type EudikitReactLabels,

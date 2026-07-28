@@ -54,17 +54,21 @@ cannot be composed with. Render it as a link.
 ## Your own UI: the render prop
 
 When `children` is a function, `<AgeGate/>` renders nothing of its own: the function receives
-the hook state plus the resolved label catalog and owns every status, `verified` included. It is
-`useVerification()` with the labels wired in.
+the hook state plus the resolved label catalog and the gate `decision`, and owns every status,
+`verified` included. It is `useVerification()` with the labels and the decision wired in. Gate
+on `decision`, not on `status` — `verified` says the presentation is authentic, not that the
+answer is the one you need (see "Verified is not the same as allowed" below).
 
 ```tsx
 'use client'
 import { AgeGate, getErrorText, VerificationQr } from '@eudikit/react'
 
 <AgeGate endpoint="/api/eudikit" locale="de">
-  {({ status, start, qrPayload, error, labels }) =>
-    status === 'verified' ? (
+  {({ decision, start, qrPayload, error, labels }) =>
+    decision === 'passed' ? (
       <p>Willkommen.</p>
+    ) : decision === 'declined' ? (
+      <p>{labels.declined}</p>
     ) : (
       <div>
         <button type="button" onClick={() => void start()}>{labels.trigger}</button>
@@ -77,8 +81,9 @@ import { AgeGate, getErrorText, VerificationQr } from '@eudikit/react'
 ```
 
 `fallback` is the smaller version of the same idea: also a node or a function of the same state,
-but it only replaces the *unverified* panel — the gate behaviour stays, and `children` render
-once verified.
+but it only replaces the panel while the gate is not passed — the gate behaviour stays, and
+`children` render once the decision is `passed`. The function form can branch on `decision` to
+give the `declined` state its own copy; a plain node shows the same content either way.
 
 ## Quick start: `<AgeGate/>`
 
@@ -97,11 +102,47 @@ export default function Page() {
 }
 ```
 
-Children stay unrendered until the server reports `verified`. The default panel renders the
-start button, the QR code with a same-device wallet link, a `role="status"` live region and a
-`role="alert"` failure line. Failures are shown from a curated list of user-facing error codes;
-anything else — configuration mistakes, internals — renders the catalog's `generic` line while
-`onError` still receives the real `code`, which is also logged to the console in development.
+Children stay unrendered until the presentation verifies **and** its answer passes the gate's
+`decide` policy — `claims?.ageOver === true` unless you override it (next section). The default
+panel renders the start button, the QR code with a same-device wallet link, a `role="status"`
+live region and a `role="alert"` failure line. Failures are shown from a curated list of
+user-facing error codes; anything else — configuration mistakes, internals — renders the
+catalog's `generic` line while `onError` still receives the real `code`, which is also logged
+to the console in development.
+
+## Verified is not the same as allowed
+
+`status === 'verified'` means the presentation is *authentic*: issuer signature, value digests,
+device binding and session binding all checked out, and the credential answers the query that
+was asked. It does **not** mean the answer is the one your page needs. A wallet can truthfully
+present `age_over_18: false` — that presentation verifies, and a gate keyed on `verified` alone
+would open for an authentic "no". Authenticity and content are separate checks, and skipping
+either one is an open door.
+
+How the two are split across this package:
+
+- **`useVerification()` never decides.** It reports `status` (was the presentation verified?)
+  and `claims` (what did it say?). A UI built directly on the hook reads `claims` and applies
+  its own policy.
+- **`<AgeGate/>` decides through the `decide` prop.** The default policy is
+  `claims?.ageOver === true`, matching what the `age` preset produces. Verified with a negative
+  decision is the **`declined`** state: `children` stay unrendered, the neutral `declined`
+  catalog line shows in the status region, `data-state` becomes `declined` — and `error` stays
+  `null`, because nothing failed.
+- **Render functions see the split explicitly**: the state they receive carries
+  `decision: 'pending' | 'passed' | 'declined'` next to `status`.
+
+Any other policy goes through `decide` — for example gating on the `country` preset's claims:
+
+```tsx
+<AgeGate
+  endpoint="/api/eudikit"
+  request="country"
+  decide={(claims) => Array.isArray(claims?.countries) && claims.countries.includes('DE')}
+>
+  <p>Willkommen.</p>
+</AgeGate>
+```
 
 ## Styling with data attributes
 
@@ -110,8 +151,13 @@ The widget ships no CSS and no theme system. Every meaningful element is address
 | attribute | where | values |
 | --- | --- | --- |
 | `data-part` | every element | `root`, `trigger`, `panel`, `qr`, `link`, `hint`, `status`, `error`, `cancel` |
-| `data-state` | the root and every part | `idle`, `creating`, `awaiting_wallet`, `polling`, `verified`, `failed`, `expired` |
+| `data-state` | the root and every part | `idle`, `creating`, `awaiting_wallet`, `polling`, `verified`, `failed`, `expired`, `declined` |
 | `data-channel` | the root, once a channel is chosen | `dc-api`, `qr`, `deep-link` |
+
+`declined` is the gate outcome, not a hook status: it replaces `verified` on every part when an
+authentic answer does not pass `decide`, so CSS keyed on the verified state never reaches an
+authentic "no". Style it neutrally — it is an outcome, not an error, and the panel keeps
+`role="alert"` for real failures.
 
 Plain CSS reaches any moment of the flow:
 
@@ -128,6 +174,10 @@ Plain CSS reaches any moment of the flow:
 }
 [data-part='error'] {
   color: #b91c1c;
+}
+[data-part='status'][data-state='declined'] {
+  border-inline-start: 3px solid currentColor;
+  padding-inline-start: 0.75rem;
 }
 ```
 

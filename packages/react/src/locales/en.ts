@@ -17,6 +17,7 @@ export const en: EudikitReactLabels = {
     failed: '',
     expired: 'This request expired. Start again when you are ready.',
   },
+  declined: "Your wallet's answer does not meet the requirement for this page.",
   errors: {
     USER_DECLINED_OR_NO_CREDENTIAL:
       'Nothing was shared. Either the request was declined, or your wallet holds no credential ' +

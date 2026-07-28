@@ -31,8 +31,13 @@ describe('getLabels', () => {
   })
 
   it('lets overrides beat the locale catalog field by field', () => {
-    const labels = getLabels('tr', { trigger: 'Kanıtla', errors: { generic: 'Olmadı.' } })
+    const labels = getLabels('tr', {
+      trigger: 'Kanıtla',
+      declined: 'Bu sayfa için uygun değil.',
+      errors: { generic: 'Olmadı.' },
+    })
     expect(labels.trigger).toBe('Kanıtla')
+    expect(labels.declined).toBe('Bu sayfa için uygun değil.')
     expect(labels.errors.generic).toBe('Olmadı.')
     expect(labels.cancel).toBe(tr.cancel)
     expect(labels.errors.WALLET_UNAVAILABLE).toBe(tr.errors.WALLET_UNAVAILABLE)
@@ -81,6 +86,7 @@ describe('catalogs', () => {
         catalog.openWallet,
         catalog.scanQrHint,
         catalog.qrLabel,
+        catalog.declined,
       ]
       for (const text of flat) {
         expect(text.trim()).not.toBe('')

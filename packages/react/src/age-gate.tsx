@@ -1,16 +1,26 @@
 /**
  * `<AgeGate/>` — the widget: `useVerification()` plus a default panel and the gate itself.
  *
+ * The gate separates two questions that must never be conflated: *is the presentation
+ * authentic* (the hook's `verified` status) and *is the answer inside it the one this page
+ * needs* (the decision). A wallet can truthfully present `age_over_18: false`; that
+ * presentation verifies, and the gate must stay closed. `decide` turns the verified claims into
+ * the decision — `claims?.ageOver === true` by default — and `children` render only when it
+ * passes. A verified negative answer is the `declined` state: not an error (`error` stays
+ * `null`), rendered as a neutral line in the status region and marked `data-state="declined"`.
+ *
  * The markup is deliberately unstyled and semantic, because an age gate lives inside somebody
  * else's design system. What it ships instead of CSS is a styling contract: every meaningful
  * element carries a stable `data-part` name, the root and every part carry `data-state` (the
- * verification status), and the root adds `data-channel` once a channel is chosen — so plain
- * CSS like `[data-part="trigger"][data-state="polling"]` reaches any moment of the flow. The
+ * verification status, or `declined` for a verified answer that does not pass), and the root
+ * adds `data-channel` once a channel is chosen — so plain CSS like
+ * `[data-part="trigger"][data-state="polling"]` reaches any moment of the flow. The
  * `data-eudikit-status` root attribute from earlier releases is kept as well.
  *
- * Custom UI has two sizes. `fallback` replaces the unverified panel and keeps the gate
- * behaviour; `children` as a function replaces everything — it receives the hook state plus the
- * resolved labels and renders every status itself, `verified` included.
+ * Custom UI has two sizes. `fallback` replaces the panel whenever the gate is not passed and
+ * keeps the gate behaviour; `children` as a function replaces everything — it receives the hook
+ * state plus the resolved labels and the decision, and renders every status itself, `verified`
+ * included.
  *
  * All copy comes from the resolved catalog (`locale`/`labels` props); the hook itself carries
  * none. The developer-facing message on `error.message` (which names endpoints and config keys)
@@ -36,10 +46,21 @@ import {
   type VerificationStatus,
 } from './use-verification.js'
 
+/**
+ * The gate's verdict, orthogonal to the hook's `status`: `pending` until a presentation
+ * verifies, then `passed` or `declined` depending on what `decide` makes of the claims.
+ */
+export type AgeGateDecision = 'pending' | 'passed' | 'declined'
+
 /** What the `children` and `fallback` render functions receive. */
 export interface AgeGateRenderState extends UseVerificationResult {
   /** The catalog resolved from the `locale` and `labels` props. */
   labels: EudikitReactLabels
+  /**
+   * The gate's verdict over the verified claims. `status === 'verified'` alone is not a reason
+   * to unlock anything — check this field (or the claims themselves) as well.
+   */
+  decision: AgeGateDecision
 }
 
 export interface AgeGateProps {
@@ -55,13 +76,29 @@ export interface AgeGateProps {
   labels?: EudikitReactLabelsOverrides
   /** Applied to the panel's root element. */
   className?: string
+  /**
+   * Turns the claims of a verified presentation into the gate decision. A verified
+   * presentation is authentic and answers the query that was asked — the answer itself can
+   * still be "no". Default: `claims?.ageOver === true`, the shape the `age` preset produces.
+   */
+  decide?: (claims: Record<string, unknown> | null) => boolean
+  /**
+   * Called whenever a presentation verifies, whatever the decision — the claims may carry a
+   * negative answer. Opening anything from here repeats the mistake `decide` exists to
+   * prevent; read the claims.
+   */
   onVerified?: (claims: Record<string, unknown>) => void
   onError?: (error: VerificationError) => void
-  /** Shown while unverified. Default: the button, the QR panel and the status line. */
+  /**
+   * Shown whenever the gate is not passed — unverified and `declined` alike. Default: the
+   * button, the QR panel and the status line. The function form receives `decision` and can
+   * tell the two apart; a plain node cannot, and shows the same content for both.
+   */
   fallback?: ReactNode | ((state: AgeGateRenderState) => ReactNode)
   /**
-   * Shown once the gate is passed — or, as a function, the whole UI: a render function
-   * replaces the default panel and the gate behaviour in every status, `verified` included.
+   * Shown once the gate is passed — the presentation verified *and* `decide` accepted its
+   * claims. As a function, the whole UI instead: a render function replaces the default panel
+   * and the gate behaviour in every status and decision, `verified` included.
    */
   children: ReactNode | ((state: AgeGateRenderState) => ReactNode)
 }
@@ -82,6 +119,7 @@ export function AgeGate(props: AgeGateProps): ReactElement {
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   })
   const labels = getLabels(props.locale, props.labels)
+  const decision = resolveDecision(verification, props.decide ?? defaultDecide)
 
   // One notification per outcome per attempt: the callbacks are usually inline arrow functions,
   // so the effect itself reruns on every render and the key is what keeps it honest.
@@ -106,17 +144,17 @@ export function AgeGate(props: AgeGateProps): ReactElement {
   }, [verification, onVerified, onError])
 
   if (typeof props.children === 'function') {
-    return <>{props.children({ ...verification, labels })}</>
+    return <>{props.children({ ...verification, labels, decision })}</>
   }
 
-  if (verification.status === 'verified') {
+  if (decision === 'passed') {
     return <>{props.children}</>
   }
 
   if (props.fallback !== undefined) {
     const rendered =
       typeof props.fallback === 'function'
-        ? props.fallback({ ...verification, labels })
+        ? props.fallback({ ...verification, labels, decision })
         : props.fallback
     return <>{rendered}</>
   }
@@ -125,39 +163,58 @@ export function AgeGate(props: AgeGateProps): ReactElement {
     <DefaultPanel
       verification={verification}
       labels={labels}
+      declined={decision === 'declined'}
       {...(props.className !== undefined ? { className: props.className } : {})}
     />
   )
 }
 
+function defaultDecide(claims: Record<string, unknown> | null): boolean {
+  return claims?.ageOver === true
+}
+
+function resolveDecision(
+  verification: UseVerificationResult,
+  decide: (claims: Record<string, unknown> | null) => boolean
+): AgeGateDecision {
+  if (verification.status !== 'verified') return 'pending'
+  return decide(verification.claims) ? 'passed' : 'declined'
+}
+
 function DefaultPanel({
   verification,
   labels,
+  declined,
   className,
 }: {
   verification: UseVerificationResult
   labels: EudikitReactLabels
+  declined: boolean
   className?: string
 }): ReactElement {
   const { status, channel, qrPayload, deepLink, error, start, cancel } = verification
   const busy = BUSY.has(status)
+  // What the styling contract sees. `declined` replaces `verified` on every part: a page
+  // styling `[data-state="verified"]` as success must not paint an authentic "no" green.
+  const state = declined ? 'declined' : status
   // Both channels carry the same wallet URI; QR is scanned from another device, the link opens
-  // a wallet on this one.
-  const walletUri = deepLink ?? qrPayload
+  // a wallet on this one. Once declined the session is settled, so the panel would only invite
+  // a scan that can no longer succeed.
+  const walletUri = declined ? null : (deepLink ?? qrPayload)
 
   return (
     <section
       className={className}
       lang={labels.lang}
       data-part="root"
-      data-state={status}
+      data-state={state}
       {...(channel !== null ? { 'data-channel': channel } : {})}
-      data-eudikit-status={status}
+      data-eudikit-status={state}
     >
       <button
         type="button"
         data-part="trigger"
-        data-state={status}
+        data-state={state}
         onClick={() => {
           void start()
         }}
@@ -168,40 +225,40 @@ function DefaultPanel({
       </button>
 
       {walletUri !== null && (
-        <div data-part="panel" data-state={status} data-eudikit-panel={channel ?? 'wallet'}>
+        <div data-part="panel" data-state={state} data-eudikit-panel={channel ?? 'wallet'}>
           {channel === 'qr' && (
             <VerificationQr
               payload={walletUri}
               label={labels.qrLabel}
               data-part="qr"
-              data-state={status}
+              data-state={state}
             />
           )}
           <p>
-            <a data-part="link" data-state={status} href={walletUri}>
+            <a data-part="link" data-state={state} href={walletUri}>
               {labels.openWallet}
             </a>
           </p>
           {channel === 'qr' && (
-            <p data-part="hint" data-state={status}>
+            <p data-part="hint" data-state={state}>
               {labels.scanQrHint}
             </p>
           )}
         </div>
       )}
 
-      <p role="status" aria-live="polite" data-part="status" data-state={status}>
-        {labels.status[status]}
+      <p role="status" aria-live="polite" data-part="status" data-state={state}>
+        {declined ? labels.declined : labels.status[status]}
       </p>
 
       {error !== null && (
-        <p role="alert" data-part="error" data-state={status}>
+        <p role="alert" data-part="error" data-state={state}>
           {getErrorText(labels, error.code)}
         </p>
       )}
 
       {busy && (
-        <button type="button" data-part="cancel" data-state={status} onClick={cancel}>
+        <button type="button" data-part="cancel" data-state={state} onClick={cancel}>
           {labels.cancel}
         </button>
       )}

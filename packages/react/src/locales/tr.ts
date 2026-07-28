@@ -17,6 +17,7 @@ export const tr: EudikitReactLabels = {
     failed: '',
     expired: 'Bu isteğin süresi doldu. Hazır olduğunuzda yeniden başlayın.',
   },
+  declined: 'Cüzdanınızın yanıtı bu sayfanın gereğini karşılamıyor.',
   errors: {
     USER_DECLINED_OR_NO_CREDENTIAL:
       'Hiçbir şey paylaşılmadı. İstek ya reddedildi ya da cüzdanınızda bu isteği karşılayan ' +

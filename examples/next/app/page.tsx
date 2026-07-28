@@ -7,6 +7,11 @@ import { AgeGate } from '@eudikit/react'
  * `channels={['qr', 'deep-link']}` is the path today's EU AV wallet answers — the QR code for a
  * phone across the desk, and the same link for a wallet on this device. The panel below the
  * button is the widget's default UI; `fallback` replaces it when a design system has opinions.
+ *
+ * The gated section renders only when the verified answer passes the gate's `decide` policy
+ * (`ageOver === true` by default). A wallet can truthfully attest `age_over_18: false`; that
+ * presentation verifies too, and the widget then shows its neutral declined line — styled in
+ * `globals.css` via `data-state="declined"` — instead of opening the gate.
  */
 export default function Page() {
   return (
