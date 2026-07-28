@@ -17,6 +17,7 @@
  */
 
 import type { EudikitErrorCode } from '@eudikit/core'
+import type { VerificationError } from './use-verification.js'
 
 /** `CreatedRequest` as it crosses HTTP: identical, with `expiresAt` as an ISO string. */
 export type SerializedCreatedRequest =
@@ -210,6 +211,17 @@ function asResultBody(body: unknown): ResultBody {
 /** Human-readable text for a code that arrived without one. */
 export function describeCode(code: EudikitErrorCode): string {
   return MESSAGES[code] ?? 'verification could not be completed'
+}
+
+/** Folds anything thrown around a request into the `{ code, message }` pair the hook reports. */
+export function toVerificationError(cause: unknown): VerificationError {
+  if (cause instanceof HandlerError) {
+    return { code: cause.code, message: cause.message }
+  }
+  return {
+    code: 'INTERNAL',
+    message: cause instanceof Error ? cause.message : 'the verification could not be started',
+  }
 }
 
 function sleep(ms: number): Promise<void> {

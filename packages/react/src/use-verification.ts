@@ -27,19 +27,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createRequest,
   describeCode,
-  HandlerError,
-  pollSession,
   type ResultBody,
   type SerializedCreatedRequest,
-  submitDcApiResponse,
+  toVerificationError,
 } from './client.js'
-import {
-  classifyDcApiError,
-  digitalCredentialsAvailable,
-  requestDigitalCredential,
-  userAgentAllowsAnyProtocol,
-  userAgentAllowsProtocol,
-} from './dc-api.js'
+import { dcApiUsable, runDcApi } from './dc-api-run.js'
+import { beginPolling, type PollRunner } from './polling.js'
 
 export type VerificationStatus =
   | 'idle'
@@ -101,13 +94,9 @@ export interface UseVerificationResult {
 }
 
 const DEFAULT_CHANNELS: Channel[] = ['dc-api', 'qr']
-const DEFAULT_POLL_INTERVAL_MS = 1500
-const MAX_POLL_INTERVAL_MS = 8000
-const POLL_BACKOFF = 1.5
-/** Consecutive transport failures tolerated before a poll gives up. */
-const MAX_POLL_FAILURES = 4
 
-interface VerificationState {
+/** One attempt's whole state; the channel runners patch it through the `apply` callback. */
+export interface VerificationState {
   status: VerificationStatus
   channel: Channel | null
   qrPayload: string | null
@@ -284,233 +273,6 @@ export function useVerification(options: UseVerificationOptions): UseVerificatio
 }
 
 // ---------------------------------------------------------------------------
-// channel runners
-// ---------------------------------------------------------------------------
-
-interface DcApiRun {
-  created: Extract<SerializedCreatedRequest, { channel: 'dc-api' }>
-  endpoint: string
-  signal: AbortSignal
-  isCurrent: () => boolean
-  apply: (patch: Partial<VerificationState>) => void
-  settle: (body: ResultBody) => void
-  fail: (failure: VerificationError) => void
-}
-
-/**
- * The whole DC API round trip. `done` means the attempt reached a verdict (or was cancelled);
- * anything else hands back a reason and lets the caller try the next channel — that is the
- * progressive-enhancement path, and it must stay silent: the user has not been shown anything
- * about the DC API at this point.
- */
-async function runDcApi(
-  run: DcApiRun
-): Promise<{ done: true } | { done: false; reason: VerificationError }> {
-  const { protocol, data } = run.created.dcApiRequest
-  if (!userAgentAllowsProtocol(protocol)) {
-    return {
-      done: false,
-      reason: {
-        code: 'UNSUPPORTED_PROTOCOL',
-        message: `this browser does not accept the ${protocol} protocol`,
-      },
-    }
-  }
-
-  run.apply({
-    status: 'awaiting_wallet',
-    channel: 'dc-api',
-    sessionId: run.created.sessionId,
-    qrPayload: null,
-    deepLink: null,
-  })
-
-  let response: { protocol: string; data: unknown }
-  try {
-    response = await requestDigitalCredential({ protocol, data }, run.signal)
-  } catch (cause) {
-    if (!run.isCurrent()) return { done: true }
-    const failure = classifyDcApiError(cause)
-    if (failure.aborted) return { done: true }
-    if (failure.fallback) {
-      return { done: false, reason: { code: failure.code, message: failure.message } }
-    }
-    run.fail({ code: failure.code, message: failure.message })
-    return { done: true }
-  }
-  if (!run.isCurrent()) return { done: true }
-
-  let body: ResultBody
-  try {
-    body = await submitDcApiResponse({
-      endpoint: run.endpoint,
-      sessionId: run.created.sessionId,
-      response,
-      signal: run.signal,
-    })
-  } catch (cause) {
-    if (!run.isCurrent()) return { done: true }
-    run.fail(toVerificationError(cause))
-    return { done: true }
-  }
-  if (!run.isCurrent()) return { done: true }
-
-  // The wallet was never invoked: the request did not reach a wallet at all, so the
-  // cross-device channel is the honest next attempt rather than a failure to report.
-  if (body.status === 'failed' && body.error?.code === 'WALLET_UNAVAILABLE') {
-    return {
-      done: false,
-      reason: { code: 'WALLET_UNAVAILABLE', message: describeCode('WALLET_UNAVAILABLE') },
-    }
-  }
-
-  run.settle(body)
-  return { done: true }
-}
-
-interface PollingStart {
-  created: Extract<SerializedCreatedRequest, { channel: 'qr' | 'deep-link' }>
-  settings: UseVerificationOptions
-  controller: AbortController
-  run: number
-  isCurrent: () => boolean
-  apply: (patch: Partial<VerificationState>) => void
-  settle: (body: ResultBody) => void
-  fail: (failure: VerificationError) => void
-  pollRef: { current: PollRunner | null }
-}
-
-function beginPolling(start: PollingStart): void {
-  const { created } = start
-  start.apply({
-    status: 'polling',
-    channel: created.channel,
-    sessionId: created.sessionId,
-    qrPayload: created.channel === 'qr' ? created.qrPayload : null,
-    deepLink: created.channel === 'deep-link' ? created.deepLink : null,
-  })
-
-  const expiresAt = Date.parse(created.expiresAt)
-  const runner = createPollRunner({
-    endpoint: start.settings.endpoint,
-    sessionId: created.sessionId,
-    expiresAt: Number.isNaN(expiresAt) ? Number.POSITIVE_INFINITY : expiresAt,
-    intervalMs: start.settings.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    signal: start.controller.signal,
-    isCurrent: start.isCurrent,
-    onResult: start.settle,
-    onExpired: () => {
-      start.apply({ status: 'expired' })
-    },
-    onError: start.fail,
-  })
-  start.pollRef.current = runner
-  runner.resume()
-}
-
-// ---------------------------------------------------------------------------
-// polling
-// ---------------------------------------------------------------------------
-
-interface PollRunner {
-  /** Starts the loop, or picks it up again after the tab was hidden. */
-  resume(): void
-  stop(): void
-}
-
-interface PollContext {
-  endpoint: string
-  sessionId: string
-  expiresAt: number
-  intervalMs: number
-  signal: AbortSignal
-  isCurrent: () => boolean
-  onResult: (body: ResultBody) => void
-  onExpired: () => void
-  onError: (failure: VerificationError) => void
-}
-
-function createPollRunner(context: PollContext): PollRunner {
-  let timer: ReturnType<typeof setTimeout> | null = null
-  let paused = false
-  let stopped = false
-  let attempt = 0
-  let failures = 0
-
-  const schedule = (): void => {
-    if (stopped || timer !== null) return
-    const delay = Math.min(context.intervalMs * POLL_BACKOFF ** attempt, MAX_POLL_INTERVAL_MS)
-    timer = setTimeout(() => {
-      timer = null
-      void tick()
-    }, delay)
-  }
-
-  const hidden = (): boolean =>
-    typeof document !== 'undefined' && document.visibilityState === 'hidden'
-
-  const tick = async (): Promise<void> => {
-    if (stopped || !context.isCurrent()) return
-    if (hidden()) {
-      paused = true
-      return
-    }
-    if (Date.now() >= context.expiresAt) {
-      stopped = true
-      context.onExpired()
-      return
-    }
-
-    try {
-      const body = await pollSession({
-        endpoint: context.endpoint,
-        sessionId: context.sessionId,
-        signal: context.signal,
-      })
-      if (stopped || !context.isCurrent()) return
-      failures = 0
-      if (body.status === 'pending') {
-        attempt += 1
-        schedule()
-        return
-      }
-      stopped = true
-      context.onResult(body)
-    } catch (cause) {
-      if (stopped || !context.isCurrent() || context.signal.aborted) return
-      const retryable = cause instanceof HandlerError && cause.network
-      failures += 1
-      if (!retryable || failures > MAX_POLL_FAILURES) {
-        stopped = true
-        context.onError(toVerificationError(cause))
-        return
-      }
-      attempt += 1
-      schedule()
-    }
-  }
-
-  return {
-    resume() {
-      if (stopped) return
-      if (paused) {
-        // Coming back to the tab deserves a prompt answer, not the tail of a long backoff.
-        paused = false
-        attempt = 0
-      }
-      schedule()
-    },
-    stop() {
-      stopped = true
-      if (timer !== null) {
-        clearTimeout(timer)
-        timer = null
-      }
-    },
-  }
-}
-
-// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -520,10 +282,6 @@ function resolveChannels(channels: Channel[] | undefined): Channel[] {
     (channel) => channel === 'dc-api' || channel === 'qr' || channel === 'deep-link'
   )
   return filtered.length === 0 ? DEFAULT_CHANNELS : filtered
-}
-
-function dcApiUsable(): boolean {
-  return digitalCredentialsAvailable() && userAgentAllowsAnyProtocol()
 }
 
 function resultPatch(body: ResultBody): Partial<VerificationState> {
@@ -538,15 +296,5 @@ function resultPatch(body: ResultBody): Partial<VerificationState> {
     status: 'failed',
     claims: null,
     error: { code, message: body.error?.message ?? describeCode(code) },
-  }
-}
-
-function toVerificationError(cause: unknown): VerificationError {
-  if (cause instanceof HandlerError) {
-    return { code: cause.code, message: cause.message }
-  }
-  return {
-    code: 'INTERNAL',
-    message: cause instanceof Error ? cause.message : 'the verification could not be started',
   }
 }
