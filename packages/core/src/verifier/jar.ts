@@ -55,8 +55,10 @@ export function resolveSignedRequestMaterial(
   if (signing === null) {
     throw new EudikitError(
       'CONFIG_SIGNING_KEY_REQUIRED',
-      'this request must be signed but no signing key is configured: set ' +
-        'keys.requestSigning (PKCS#8 PEM or private JWK) or the EUDIKIT_SIGNING_KEY env var'
+      `the '${prefix}' client id prefix requires a signed request object and no signing key ` +
+        'is configured: set keys.requestSigning (PKCS#8 PEM or private JWK) or the ' +
+        'EUDIKIT_SIGNING_KEY env var, together with keys.requestSigningCertificateChain. ' +
+        "For today's AV wallet, profile 'av' sends unsigned requests and needs no keys at all"
     )
   }
   if (config.keys.chainB64.length === 0) {

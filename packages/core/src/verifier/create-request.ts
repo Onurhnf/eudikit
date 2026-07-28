@@ -172,11 +172,12 @@ export async function createRequest(
     )
   }
 
-  const clientIdPrefix =
-    options.clientIdPrefix === undefined
-      ? config.clientIdPrefix
-      : validateClientIdPrefix(options.clientIdPrefix, 'options.clientIdPrefix')
-  const signedRequest = resolveSignedRequestFlag(options, profile, channel, clientIdPrefix)
+  const { signedRequest, clientIdPrefix } = resolveSigningAndPrefix(
+    config,
+    options,
+    profile,
+    channel
+  )
   const material = signedRequest ? resolveSignedRequestMaterial(config, clientIdPrefix) : null
 
   const context: RequestContext = buildContext(config, options, dcql, profile)
@@ -189,29 +190,41 @@ export async function createRequest(
 
 /**
  * Signing and the client id prefix are one decision, not two: the `x509_*` prefixes MUST sign
- * and `redirect_uri` MUST NOT (OpenID4VP 1.0 §5.10). Defaults when nothing is forced:
- * `dc-api` unsigned, QR/deep-link signed exactly for the `'eudi'` profile.
+ * and `redirect_uri` MUST NOT (OpenID4VP 1.0 §5.10). An explicit prefix (per request or in the
+ * config) always wins and forces the matching signing behavior. When neither side is forced,
+ * the request is signed for `'eudi'` QR/deep-link and unsigned everywhere else, and the
+ * default prefix follows that decision: `x509_hash` — the prefix HAIP mandates for EUDI
+ * wallets — for signed requests, `redirect_uri` for unsigned ones.
  */
-function resolveSignedRequestFlag(
+function resolveSigningAndPrefix(
+  config: ResolvedVerifierConfig,
   options: CreateRequestOptions<unknown>,
   profile: WalletProfile,
-  channel: Channel,
-  clientIdPrefix: ClientIdPrefix
-): boolean {
+  channel: Channel
+): { signedRequest: boolean; clientIdPrefix: ClientIdPrefix } {
   const explicit = optionalBoolean(options.signedRequest, 'options.signedRequest')
+  const prefix =
+    options.clientIdPrefix === undefined
+      ? config.clientIdPrefix
+      : validateClientIdPrefix(options.clientIdPrefix, 'options.clientIdPrefix')
 
-  if (clientIdPrefix !== 'redirect_uri') {
+  if (prefix !== null && prefix !== 'redirect_uri') {
     if (explicit === false) {
       invalid(
-        `clientIdPrefix '${clientIdPrefix}' requires a signed request object ` +
+        `clientIdPrefix '${prefix}' requires a signed request object ` +
           '(OpenID4VP 1.0 §5.10), so signedRequest cannot be false'
       )
     }
-    return true
+    return { signedRequest: true, clientIdPrefix: prefix }
   }
 
   const signed = explicit ?? (channel === 'dc-api' ? false : profile === 'eudi')
-  if (signed) {
+  if (!signed) {
+    return { signedRequest: false, clientIdPrefix: prefix ?? 'redirect_uri' }
+  }
+
+  const effective = prefix ?? (profile === 'eudi' ? 'x509_hash' : 'redirect_uri')
+  if (effective === 'redirect_uri') {
     invalid(
       "a signed request object cannot use the 'redirect_uri' client id prefix — the wallet " +
         'has no way to obtain a trusted key for it (OpenID4VP 1.0 §5.10). Configure ' +
@@ -220,7 +233,7 @@ function resolveSignedRequestFlag(
         'by-value request'
     )
   }
-  return false
+  return { signedRequest: true, clientIdPrefix: effective }
 }
 
 function buildContext(

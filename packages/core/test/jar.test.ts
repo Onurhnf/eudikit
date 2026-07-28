@@ -65,6 +65,21 @@ function makeSignedVerifier(overrides: Partial<VerifierConfig> = {}): Verifier {
   })
 }
 
+/** Signing keys configured, but no explicit clientIdPrefix/clientId — the profile default applies. */
+function makeNoPrefixVerifier(): Verifier {
+  return createVerifier({
+    profile: 'eudi',
+    publicBaseUrl: PUBLIC_BASE,
+    keys: {
+      requestSigning: { pem: signerPkcs8 },
+      requestSigningCertificateChain: [signerCertPem],
+    },
+    session: memorySessionAdapter(),
+    trust: { additionalTrustAnchors: [issuer.certificate], avTrustedList: false },
+    now: () => FIXED_NOW,
+  })
+}
+
 function uriParams(uri: string): URLSearchParams {
   return new URLSearchParams(uri.slice(uri.indexOf('?') + 1))
 }
@@ -189,6 +204,39 @@ describe('signed request objects — JWS shape and claims', () => {
       new Uint8Array(await crypto.subtle.digest('SHA-256', Buffer.from(signerCert)))
     ).toString('base64url')}`
     expect(uriParams(created.qrPayload).get('client_id')).toBe(expected)
+  })
+
+  it("defaults profile 'eudi' to the x509_hash prefix when none is configured", async () => {
+    const verifier = makeNoPrefixVerifier()
+    const created = await verifier.requests.create({ preset: presets.age(), channel: 'qr' })
+    if (created.channel !== 'qr') throw new Error('expected qr')
+    const expected = `x509_hash:${Buffer.from(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', Buffer.from(signerCert)))
+    ).toString('base64url')}`
+    expect(uriParams(created.qrPayload).get('client_id')).toBe(expected)
+  })
+
+  it("a per-request profile 'av' override falls back to the unsigned redirect_uri flow", async () => {
+    // The prefix default follows the effective profile of the request, so an 'eudi' verifier
+    // with signing keys can still mint plain AV requests without per-request prefix juggling.
+    const verifier = makeNoPrefixVerifier()
+    const created = await verifier.requests.create({
+      preset: presets.age(),
+      channel: 'deep-link',
+      profile: 'av',
+    })
+    if (created.channel !== 'deep-link') throw new Error('expected deep-link')
+    expect(created.requestUri).toBeUndefined()
+    const params = uriParams(created.deepLink)
+    expect(params.get('client_id')).toBe(`redirect_uri:${PUBLIC_BASE}/api/eudikit/wallet/response`)
+    expect(params.get('response_mode')).toBe('direct_post')
+  })
+
+  it('never advertises request_uri_method — absent means GET, the only method the endpoint serves', async () => {
+    const verifier = makeSignedVerifier()
+    const created = await verifier.requests.create({ preset: presets.age(), channel: 'qr' })
+    if (created.channel !== 'qr') throw new Error('expected qr')
+    expect(uriParams(created.qrPayload).get('request_uri_method')).toBeNull()
   })
 
   it('signs with the algorithm the key curve requires (P-384 → ES384)', async () => {

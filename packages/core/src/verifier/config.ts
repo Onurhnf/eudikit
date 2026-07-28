@@ -51,7 +51,12 @@ export interface ResolvedSigningKeys {
 
 export interface ResolvedVerifierConfig {
   profile: WalletProfile
-  clientIdPrefix: ClientIdPrefix
+  /**
+   * Explicitly configured prefix; `null` when the config leaves it to the profile default
+   * (`'av'` → `redirect_uri`, `'eudi'` → `x509_hash`). Resolved at request time, not here,
+   * because a per-request `profile` override carries its own default.
+   */
+  clientIdPrefix: ClientIdPrefix | null
   /** Original client id for the `x509_*` prefixes; `null` when not configured. */
   clientId: string | null
   /** Normalized (no trailing slash); `null` when neither config nor env provides one. */
@@ -111,7 +116,7 @@ export function resolveVerifierConfig(config: VerifierConfig): ResolvedVerifierC
     profile: validateProfile(config.profile, 'config.profile'),
     clientIdPrefix:
       config.clientIdPrefix === undefined
-        ? 'redirect_uri'
+        ? null
         : validateClientIdPrefix(config.clientIdPrefix, 'config.clientIdPrefix'),
     clientId: resolveClientId(config.clientId),
     publicBaseUrl: resolvePublicBaseUrl(config.publicBaseUrl),

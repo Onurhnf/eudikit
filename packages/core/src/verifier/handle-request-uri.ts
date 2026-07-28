@@ -13,6 +13,10 @@
  * `Content-Type: application/oauth-authz-req+jwt`, body = the JWS compact serialization. Any
  * HTTP error makes the wallet terminate the flow — which is exactly what a replayed or
  * expired request deserves.
+ *
+ * The endpoint is GET-only, and the requests this SDK produces never advertise
+ * `request_uri_method` — absent means GET per OpenID4VP 1.0; POST negotiation
+ * (`wallet_metadata`/`wallet_nonce`) is planned for a later release.
  */
 
 import type { ResolvedVerifierConfig } from './config.js'

@@ -332,10 +332,28 @@ describe('requests.create — per-request option validation', () => {
 })
 
 describe('requests.create — signing × prefix × transport rules', () => {
-  it("rejects the 'eudi' qr/deep-link default (signed) under the redirect_uri prefix", async () => {
-    // profile 'eudi' defaults QR/deep-link to a signed request, and the default prefix
-    // cannot sign (OpenID4VP 1.0 §5.10) — the error must point at both ways out.
+  it("fails the 'eudi' qr/deep-link default without signing keys, naming both ways out", async () => {
+    // profile 'eudi' defaults QR/deep-link to a signed x509_hash request (HAIP), which
+    // cannot be built without key material — the error must point at both exits: configure
+    // keys + chain, or target today's AV wallet with profile 'av'.
     const { verifier } = makeVerifier({ profile: 'eudi' })
+    for (const channel of ['qr', 'deep-link'] as const) {
+      const error = await expectEudikitError(
+        () => verifier.requests.create({ preset: agePreset, channel }),
+        'CONFIG_SIGNING_KEY_REQUIRED'
+      )
+      expect(error.message).toContain('x509_hash')
+      expect(error.message).toContain('keys.requestSigning')
+      expect(error.message).toContain('keys.requestSigningCertificateChain')
+      expect(error.message).toContain("profile 'av'")
+    }
+  })
+
+  it("rejects the 'eudi' signed default under an explicit redirect_uri prefix", async () => {
+    // The combination stays selectable — the profile is defaults, not a lock — but a signed
+    // request cannot use redirect_uri (OpenID4VP 1.0 §5.10), so the caller must also opt
+    // down to signedRequest: false. The error points at both ways out.
+    const { verifier } = makeVerifier({ profile: 'eudi', clientIdPrefix: 'redirect_uri' })
     for (const channel of ['qr', 'deep-link'] as const) {
       const error = await expectEudikitError(
         () => verifier.requests.create({ preset: agePreset, channel }),
@@ -349,7 +367,7 @@ describe('requests.create — signing × prefix × transport rules', () => {
 
   it('rejects an explicit signedRequest: true with the redirect_uri prefix on any channel', async () => {
     const av = makeVerifier()
-    const eudi = makeBareVerifier({ profile: 'eudi' })
+    const eudi = makeBareVerifier({ profile: 'eudi', clientIdPrefix: 'redirect_uri' })
     for (const [verifier, channel] of [
       [av.verifier, 'deep-link'],
       [eudi.verifier, 'dc-api'],
@@ -360,6 +378,18 @@ describe('requests.create — signing × prefix × transport rules', () => {
       )
       expect(error.message).toContain('redirect_uri')
     }
+  })
+
+  it('derives the prefix default from the effective per-request profile', async () => {
+    // An 'av' verifier asked for a one-off 'eudi' request gets the whole 'eudi' bundle,
+    // x509_hash prefix included — and therefore the missing-keys error, not a silently
+    // wrong unsigned request.
+    const { verifier } = makeVerifier()
+    const error = await expectEudikitError(
+      () => verifier.requests.create({ preset: agePreset, channel: 'qr', profile: 'eudi' }),
+      'CONFIG_SIGNING_KEY_REQUIRED'
+    )
+    expect(error.message).toContain('x509_hash')
   })
 
   it("rejects jarMode 'by-reference' on an unsigned request", async () => {

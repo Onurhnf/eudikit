@@ -108,14 +108,21 @@ export interface VerifierConfig {
    *
    * - `'av'`   → unsigned by-value request, `redirect_uri` prefix, `direct_post` (unencrypted),
    *              scheme `eudi-openid4vp`
-   * - `'eudi'` → signed JAR by reference, `direct_post.jwt` (ECDH-ES), `request_uri_method` support
+   * - `'eudi'` → signed JAR by reference, `x509_hash` prefix (HAIP), `direct_post.jwt` (ECDH-ES)
    */
   profile: WalletProfile
 
   /** Original client id for the `x509_*` prefixes (e.g. a dNSName). Derived automatically for `redirect_uri`. */
   clientId?: string
 
-  /** Default prefix. Per-request override: `requests.create({ clientIdPrefix })`. Default `redirect_uri`. */
+  /**
+   * Client Identifier Prefix (OpenID4VP 1.0 §5.10). The default follows the profile:
+   * `'av'` → `redirect_uri` (unsigned requests), `'eudi'` → `x509_hash` — HAIP mandates
+   * x509-authenticated requests in the EUDI ecosystem, where `redirect_uri` is forbidden.
+   * An explicit value always wins, `redirect_uri` under `'eudi'` included: the SDK builds
+   * such requests (useful against test wallets), but EUDI wallets will reject them.
+   * Per-request override: `requests.create({ clientIdPrefix })`.
+   */
   clientIdPrefix?: ClientIdPrefix
 
   keys?: VerifierKeys
@@ -228,7 +235,10 @@ export interface Verifier {
    */
   handleWalletResponse(request: Request): Promise<Response>
 
-  /** QR/deep-link (by reference): the `request_uri` endpoint. Serves the JAR JWT ONCE; 404 afterwards. */
+  /**
+   * QR/deep-link (by reference): the `request_uri` endpoint. Serves the JAR JWT ONCE; 404
+   * afterwards. GET only — `request_uri_method=post` negotiation is planned for a later release.
+   */
   handleRequestUri(request: Request, sessionId: string): Promise<Response>
 
   /** Frontend polling — non-destructive; `'expired'` after `resultTtlSeconds`. */
@@ -264,6 +274,7 @@ export interface CreateRequestOptions<TClaims = Record<string, unknown>> {
 
   // ---- per-request overrides ----
   profile?: WalletProfile
+  /** Overrides the config value and the profile default (`'av'` → `redirect_uri`, `'eudi'` → `x509_hash`). */
   clientIdPrefix?: ClientIdPrefix
 
   /** The SDK generates the nonce (≥16 bytes, base64url). Override only for tests. */
